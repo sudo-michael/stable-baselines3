@@ -20,11 +20,12 @@ from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.her.her_replay_buffer import HerReplayBuffer
 
 
-class OffPolicyAlgorithm(BaseAlgorithm):
+class HJOffPolicyAlgorithm(BaseAlgorithm):
     """
     The base for Off-Policy algorithms (ex: SAC/TD3)
 
-    :param policy: Policy objecparam env: The environment to learn from
+    :param policy: Policy object
+    :param env: The environment to learn from
                 (if registered in Gym, can be str. Can be None for loading trained models)
     :param policy_base: The base policy used by this method
     :param learning_rate: learning rate for the optimizer,
@@ -103,9 +104,10 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         sde_support: bool = True,
         remove_time_limit_termination: bool = False,
         supported_action_spaces: Optional[Tuple[gym.spaces.Space, ...]] = None,
+        hj_controller_fn = None,
+        takeover_count:int  = 0,
     ):
-
-        super(OffPolicyAlgorithm, self).__init__(
+        super(HJOffPolicyAlgorithm, self).__init__(
             policy=policy,
             env=env,
             policy_base=policy_base,
@@ -122,6 +124,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
             sde_sample_freq=sde_sample_freq,
             supported_action_spaces=supported_action_spaces,
         )
+
         self.buffer_size = buffer_size
         self.batch_size = batch_size
         self.learning_starts = learning_starts
@@ -150,6 +153,10 @@ class OffPolicyAlgorithm(BaseAlgorithm):
             self.policy_kwargs["use_sde"] = self.use_sde
         # For gSDE only
         self.use_sde_at_warmup = use_sde_at_warmup
+        
+
+        assert hj_controller_fn != None
+        self.hj_controller_fn = hj_controller_fn
 
     def _convert_train_freq(self) -> None:
         """
@@ -332,7 +339,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         tb_log_name: str = "run",
         eval_log_path: Optional[str] = None,
         reset_num_timesteps: bool = True,
-    ) -> "OffPolicyAlgorithm":
+    ) -> "HJOffPolicyAlgorithm":
 
         total_timesteps, callback = self._setup_learn(
             total_timesteps,
@@ -406,6 +413,12 @@ class OffPolicyAlgorithm(BaseAlgorithm):
             # we assume that the policy uses tanh to scale the action
             # We use non-deterministic action in the case of SAC, for TD3, it does not matter
             unscaled_action, _ = self.predict(self._last_obs, deterministic=False)
+
+        takeover, unscaled_opt_action = self.hj_controller_fn(self.env._obs_from_buf())
+        if takeover:
+            unscaled_action = unscaled_opt_action
+            self.log_takover()
+
 
         # Rescale the action from [low, high] to [-1, 1]
         if isinstance(self.action_space, gym.spaces.Box):
@@ -516,7 +529,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         replay_buffer: ReplayBuffer,
         action_noise: Optional[ActionNoise] = None,
         learning_starts: int = 0,
-        log_interval: Optional[int] = None,
+        log_interval: Optional[int] = None
     ) -> RolloutReturn:
         """
         Collect experiences and store them into a ``ReplayBuffer``.
@@ -537,6 +550,9 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         :param log_interval: Log data every ``log_interval`` episodes
         :return:
         """
+
+        assert self.hj_controller_fn != None
+
         # Switch to eval mode (this affects batch norm / dropout)
         self.policy.set_training_mode(False)
 
@@ -544,7 +560,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         num_collected_steps, num_collected_episodes = 0, 0
 
         assert isinstance(env, VecEnv), "You must pass a VecEnv"
-        assert env.num_envs == 1, "OffPolicyAlgorithm only support single environment"
+        assert env.num_envs == 1, "HJOffPolicyAlgorithm only support single environment"
         assert train_freq.frequency > 0, "Should at least collect one step or episode."
 
         if self.use_sde:
@@ -566,8 +582,12 @@ class OffPolicyAlgorithm(BaseAlgorithm):
                 # Select action randomly or according to policy
                 action, buffer_action = self._sample_action(learning_starts, action_noise)
 
+
                 # Rescale and perform action
                 new_obs, reward, done, infos = env.step(action)
+
+                # TODO find a better way of doing this
+                self.log_collision(infos[0])
 
                 self.num_timesteps += 1
                 episode_timesteps += 1
@@ -616,3 +636,17 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         callback.on_rollout_end()
 
         return RolloutReturn(mean_reward, num_collected_steps, num_collected_episodes, continue_training)
+
+
+    def log_takover(self, counter=[0]):
+        # really dirty way of doing this
+        counter[0] += 1
+        self.logger.record("hj/takeover", counter[0])
+
+    def log_collision(self, info, counter=[0]):
+        # really dirty way of doing this
+        if info['collide_with_obs']:
+            counter[0] += 1
+            self.logger.record("hj/collide", counter[0])
+
+
