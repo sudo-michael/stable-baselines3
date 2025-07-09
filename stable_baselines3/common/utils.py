@@ -638,3 +638,84 @@ def get_system_info(print_info: bool = True) -> tuple[dict[str, str], str]:
     if print_info:
         print(env_info_str)
     return env_info, env_info_str
+
+
+# UTILITIES FOR SPMA
+def get_grad_list(params, centralize_grad=False):
+    grad_list = []
+    for p in params:
+        g = p.grad
+        if g is None:
+            g = 0.
+        else:
+            g = p.grad.data
+            if len(list(g.size()))>1 and centralize_grad:
+                # centralize grads
+                g.add_(-g.mean(dim = tuple(range(1,len(list(g.size())))), 
+                       keepdim = True))
+                   
+        grad_list += [g]        
+                   
+    return grad_list
+
+def compute_grad_norm(grad_list, centralize_grad_norm=False):
+    grad_norm = 0.
+    for g in grad_list:
+        if g is None or (isinstance(g, float) and g == 0.):
+            continue
+
+        if g.dim() > 1 and centralize_grad_norm: 
+            # centralize grads 
+            g.add_(-g.mean(dim = tuple(range(1,g.dim())), keepdim = True))
+
+        grad_norm += th.sum(th.mul(g, g)).cpu()
+    grad_norm = th.sqrt(grad_norm)
+    return grad_norm
+
+
+# armijo search.
+def armijo_search(closure, params, grad_list, grad_norm, alpha_max, c, beta=0.9):
+    def check_armijo_condition(step_size):
+        found_ = 0
+
+        # compute lhs and rhs of the Armijo equation.
+        lhs = next_loss
+        rhs = curr_loss - c * step_size * grad_norm**2
+        if lhs <= rhs:
+            found_ = 1
+        else:
+            step_size = step_size * beta
+
+        return found_, step_size
+
+    # load the current params, gradients and loss.
+    params_current = deepcopy(params)
+    curr_loss, _, _ = closure(backwards=False, curr_loss=None)
+
+    # apply armijo
+    found = 0
+    alpha = alpha_max
+    ctr = 0
+    with th.no_grad():
+        while not found:
+            # compute the prospective step size.
+            for i, (p_next, p_current) in enumerate(zip(params, params_current)):
+                p_next.data = p_current - alpha * grad_list[i]
+
+            # compute the loss using the prospective step size.
+            ctr += 1
+            try:
+                next_loss, _, _ = closure(backwards=False, curr_loss=None)
+            except ValueError:
+                alpha = alpha * beta
+                if ctr > 500:
+                    alpha = 0
+                continue
+            
+            # apply one step of armijo.
+            found, alpha = check_armijo_condition(alpha)
+
+            if ctr > 500:
+                break
+
+    return alpha
