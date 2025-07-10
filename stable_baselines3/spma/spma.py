@@ -1,5 +1,6 @@
 import warnings
-from typing import Any, Dict, Optional, Type, TypeVar, Union
+from typing import Any, ClassVar, Dict, Optional, Type, TypeVar, Union
+
 
 import numpy as np
 import torch as th
@@ -7,15 +8,16 @@ from gymnasium import spaces
 from torch.nn import functional as F
 
 from stable_baselines3.common.buffers import RolloutBuffer
-from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
-from stable_baselines3.common.policies import ActorCriticPolicy
+from stable_baselines3.common.decision_aware_on_policy_algorithm import DecisionAwareOnPolicyAlgorithm
+from stable_baselines3.common.policies import BasePolicy
+from stable_baselines3.common.decision_aware_policies import DecisionAwareActorCriticPolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_grad_list, compute_grad_norm, armijo_search
 
 SelfSPMA = TypeVar("SelfSPMA", bound="SPMA")
 
 
-class SPMA(OnPolicyAlgorithm):
+class SPMA(DecisionAwareOnPolicyAlgorithm):
     """
     Softmax Policy Mirror Ascent algorithm (SPMA)
 
@@ -53,11 +55,14 @@ class SPMA(OnPolicyAlgorithm):
     :param _init_setup_model: Whether or not to build the network at the creation of the instance
     """
 
+    policy_aliases: ClassVar[dict[str, type[BasePolicy]]] = {
+        "MlpPolicy": DecisionAwareActorCriticPolicy,
+    }
+
     def __init__(
         self,
-        policy: Union[str, Type[ActorCriticPolicy]],
+        policy: Union[str, type[DecisionAwareActorCriticPolicy]],
         env: Union[GymEnv, str],
-        timesteps: int,
         learning_rate_actor: Union[float, Schedule] = 3e-4,
         learning_rate_critic: Union[float, Schedule] = 3e-4,
         n_steps: int = 2048,
@@ -71,11 +76,11 @@ class SPMA(OnPolicyAlgorithm):
         max_grad_norm: float = 0.5,
         use_sde: bool = False,
         sde_sample_freq: int = -1,
-        rollout_buffer_class: Optional[Type[RolloutBuffer]] = None,
-        rollout_buffer_kwargs: Optional[Dict[str, Any]] = None,
+        rollout_buffer_class: Optional[type[RolloutBuffer]] = None,
+        rollout_buffer_kwargs: Optional[dict[str, Any]] = None,
         stats_window_size: int = 100,
         tensorboard_log: Optional[str] = None,
-        policy_kwargs: Optional[Dict[str, Any]] = None,
+        policy_kwargs: Optional[dict[str, Any]] = None,
         verbose: int = 0,
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
@@ -146,7 +151,6 @@ class SPMA(OnPolicyAlgorithm):
         self.batch_size = batch_size
         self.n_epochs = n_epochs
         self.normalize_advantage = normalize_advantage
-        self.timesteps = timesteps
         self.env_name = env_name
         self.eta = eta
         self.use_armijo_actor = use_armijo_actor
