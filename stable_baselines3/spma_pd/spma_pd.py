@@ -1,6 +1,6 @@
 import warnings
 
-from typing import Any, ClassVar, Dict, Optional, Type, TypeVar, Union
+from typing import Any, ClassVar, Optional, TypeVar, Union
 
 
 import numpy as np
@@ -16,6 +16,123 @@ from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedul
 from stable_baselines3.common.utils import get_grad_list, compute_grad_norm, armijo_search
 
 SelfSPMAPD = TypeVar("SelfSPMA", bound="SPMAPD")
+
+class Lagrange:
+    """Base class for Lagrangian-base Algorithms.
+    src: https://github.com/PKU-Alignment/omnisafe/blob/main/omnisafe/common/lagrange.py
+
+    This class implements the Lagrange multiplier update and the Lagrange loss.
+
+    ..  note::
+        Any traditional policy gradient algorithm can be converted to a Lagrangian-based algorithm
+        by inheriting from this class and implementing the :meth:`_loss_pi` method.
+
+    Examples:
+        >>> from omnisafe.common.lagrange import Lagrange
+        >>> def loss_pi(self, data):
+        ...     # implement your own loss function here
+        ...     return loss
+
+    You can also inherit this class to implement your own Lagrangian-based algorithm, with any
+    policy gradient method you like in OmniSafe.
+
+    Examples:
+        >>> from omnisafe.common.lagrange import Lagrange
+        >>> class CustomAlgo:
+        ...     def __init(self) -> None:
+        ...         # initialize your own algorithm here
+        ...         super().__init__()
+        ...         # initialize the Lagrange multiplier
+        ...         self.lagrange = Lagrange(**self._cfgs.lagrange_cfgs)
+
+    Args:
+        cost_limit (float): The cost limit.
+        lagrangian_multiplier_init (float): The initial value of the Lagrange multiplier.
+        lambda_lr (float): The learning rate of the Lagrange multiplier.
+        lambda_optimizer (str): The optimizer for the Lagrange multiplier.
+        lagrangian_upper_bound (float or None, optional): The upper bound of the Lagrange multiplier.
+            Defaults to None.
+
+    Attributes:
+        cost_limit (float): The cost limit.
+        lambda_lr (float): The learning rate of the Lagrange multiplier.
+        lagrangian_upper_bound (float, optional): The upper bound of the Lagrange multiplier.
+            Defaults to None.
+        lagrangian_multiplier (torch.nn.Parameter): The Lagrange multiplier.
+        lambda_range_projection (torch.nn.ReLU): The projection function for the Lagrange multiplier.
+    """
+
+    # pylint: disable-next=too-many-arguments
+    def __init__(
+        self,
+        cost_limit: float,
+        lagrangian_multiplier_init: float,
+        lambda_lr: float,
+        lambda_optimizer: str,
+        lagrangian_upper_bound: float | None = None,
+    ) -> None:
+        """Initialize an instance of :class:`Lagrange`."""
+        self.cost_limit: float = cost_limit
+        self.lambda_lr: float = lambda_lr
+        self.lagrangian_upper_bound: float | None = lagrangian_upper_bound
+
+        init_value = max(lagrangian_multiplier_init, 0.0)
+        self.lagrangian_multiplier: th.nn.Parameter = th.nn.Parameter(
+            th.as_tensor(init_value),
+            requires_grad=True,
+        )
+        self.lambda_range_projection: th.nn.ReLU = th.nn.ReLU()
+        # fetch optimizer from PyTorch optimizer package
+        assert hasattr(
+            th.optim,
+            lambda_optimizer,
+        ), f'Optimizer={lambda_optimizer} not found in torch.'
+        torch_opt = getattr(th.optim, lambda_optimizer)
+        self.lambda_optimizer: th.optim.Optimizer = torch_opt(
+            [
+                self.lagrangian_multiplier,
+            ],
+            lr=lambda_lr,
+        )
+
+    def compute_lambda_loss(self, mean_ep_cost: float) -> th.Tensor:
+        """Penalty loss for Lagrange multiplier.
+
+        .. note::
+            ``mean_ep_cost`` is obtained from ``self.logger.get_stats('EpCosts')[0]``, which is
+            already averaged across MPI processes.
+
+        Args:
+            mean_ep_cost (float): mean episode cost.
+
+        Returns:
+            Penalty loss for Lagrange multiplier.
+        """
+        return -self.lagrangian_multiplier * (mean_ep_cost - self.cost_limit)
+
+    def update_lagrange_multiplier(self, Jc: float) -> None:
+        r"""Update Lagrange multiplier (lambda).
+
+        We update the Lagrange multiplier by minimizing the penalty loss, which is defined as:
+
+        .. math::
+
+            \lambda ^{'} = \lambda + \eta \cdot (J_C - J_C^*)
+
+        where :math:`\lambda` is the Lagrange multiplier, :math:`\eta` is the learning rate,
+        :math:`J_C` is the mean episode cost, and :math:`J_C^*` is the cost limit.
+
+        Args:
+            Jc (float): mean episode cost.
+        """
+        self.lambda_optimizer.zero_grad()
+        lambda_loss = self.compute_lambda_loss(Jc)
+        lambda_loss.backward()
+        self.lambda_optimizer.step()
+        self.lagrangian_multiplier.data.clamp_(
+            0.0,
+            self.lagrangian_upper_bound,
+        )  # enforce: lambda in [0, inf]
 
 
 class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
@@ -178,7 +295,7 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         # alternative approach is to use bregman_div_loss = -1/self.eta * log_ratio
         bregman_div_loss = 1 / self.eta * ((th.exp(log_ratio) - 1) - log_ratio)
         total_loss = th.mean(linear_loss + bregman_div_loss)
-        
+
         return total_loss, linear_loss, bregman_div_loss
 
     def compute_critic_loss(self, rollout_data, actions):
@@ -186,7 +303,7 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         # Re-sample the noise matrix because the log_std has changed
         values, _, _, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
         values = values.flatten()
-        
+
         # critic loss.
         loss = F.mse_loss(rollout_data.returns, values)
         return loss
@@ -196,92 +313,34 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         # Re-sample the noise matrix because the log_std has changed
         _, cost_values, _, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
         cost_values = cost_values.flatten()
-        
+
         # critic loss.
         loss = F.mse_loss(rollout_data.cost_returns, cost_values)
         return loss
 
     def _create_actor_closure(self, rollout_data, actions, advantages, old_log_prob):
         """Create a closure for Armijo line search that only handles loss computation."""
+
         def closure():
             return self.compute_actor_loss(rollout_data, actions, advantages, old_log_prob)[0]
+
         return closure
 
     def _create_critic_closure(self, rollout_data, actions):
         """Create a closure for Armijo line search that only handles loss computation."""
+
         def closure():
             return self.compute_critic_loss(rollout_data, actions)
+
         return closure
 
     def _create_cost_critic_closure(self, rollout_data, actions):
         """Create a closure for Armijo line search that only handles loss computation."""
+
         def closure():
             return self.compute_cost_critic_loss(rollout_data, actions)
+
         return closure
-    # def compute_actor_loss(self, rollout_data, actions, advantages, old_log_prob, backwards=False, curr_loss=None):
-    #     # skip recompuing the loss if you already have it and just want to do a backward pass.
-    #     if curr_loss is None:
-    #         _, _, log_prob, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
-    #         log_ratio = log_prob - old_log_prob.detach()
-    #         linear_loss = -log_ratio * advantages
-    #         # using approx kl for bregman div from Schulman blog: http://joschu.net/blog/kl-approx.html
-    #         # approx kl is an unbiased estimator of the true kl but results in less variance.
-    #         # alternative approach is to use bregman_div_loss = -1/self.eta * log_ratio
-    #         bregman_div_loss = 1 / self.eta * ((th.exp(log_ratio) - 1) - log_ratio)
-    #         curr_loss = th.mean(linear_loss + bregman_div_loss)
-
-    #     # backward pass
-    #     if backwards:
-    #         self.policy.optimizer_act.zero_grad()
-    #         curr_loss.backward()
-
-    #         return curr_loss, None, None
-
-    #     return curr_loss, linear_loss, bregman_div_loss
-
-    # def compute_critic_loss(self, rollout_data, actions, backwards=False, curr_loss=None):
-    #     if curr_loss is None and backwards:
-    #         raise ValueError("Can not perform backward pass without curr_loss.")
-
-    #     # skip recompuing the loss if you already have it and just want to do a backward pass.
-    #     if curr_loss is None:
-    #         # Re-sample the noise matrix because the log_std has changed
-    #         values, _, _, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
-    #         values = values.flatten()
-
-    #         # critic loss.
-    #         curr_loss = F.mse_loss(rollout_data.returns, values)
-
-    #     # backward pass.
-    #     if backwards:
-    #         self.policy.optimizer_critic.zero_grad()
-    #         curr_loss.backward()
-
-    #         return curr_loss, None, None
-
-    #     return curr_loss, None, None
-
-    # def compute_cost_critic_loss(self, rollout_data, actions, backwards=False, curr_loss=None):
-    #     if curr_loss is None and backwards:
-    #         raise ValueError("Can not perform backward pass without curr_loss.")
-
-    #     # skip recompuing the loss if you already have it and just want to do a backward pass.
-    #     if curr_loss is None:
-    #         # Re-sample the noise matrix because the log_std has changed
-    #         _, cost_values, _, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
-    #         cost_values = cost_values.flatten()
-
-    #         # critic loss.
-    #         curr_loss = F.mse_loss(rollout_data.cost_returns, cost_values)
-
-    #     # backward pass.
-    #     if backwards:
-    #         self.policy.optimizer_cost_critic.zero_grad()
-    #         curr_loss.backward()
-
-    #         return curr_loss, None, None
-
-    #     return curr_loss, None, None
 
     def train(self) -> None:
         """
@@ -289,8 +348,13 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         """
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
-        # TODO inherit 
-        self._update_learning_rate([("actor", self.policy.optimizer_act), ("critic", self.policy.optimizer_critic)])
+        self._update_learning_rate(
+            [
+                ("actor", self.policy.optimizer_act),
+                ("critic", self.policy.optimizer_critic),
+                ("cost_critic", self.policy.optimizer_cost_critic),
+            ]
+        )
 
         # record losses and number of times the surrogate loss is not decreasing in the inner loop.
         linear_losses = []
@@ -298,8 +362,10 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
 
         alpha_max_actor = self.alpha_max
         alpha_max_critic = self.alpha_max
+        alpha_max_cost_critic = self.alpha_max
         alpha_actor = 1.0
         alpha_critic = 1.0
+        alpha_cost_critic = 1.0
         for epoch in range(self.n_epochs):
             # Do a complete pass on the rollout buffer
             for batch_idx, rollout_data in enumerate(self.rollout_buffer.get(self.batch_size)):
@@ -326,66 +392,69 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
                 # closure_actor = lambda backwards, curr_loss: self.compute_actor_loss(
                 #     rollout_data, actions, advantages, old_log_prob, backwards=backwards, curr_loss=curr_loss
                 # )
-
-                closure_actor = lambda backwards, curr_loss: self.compute_actor_loss(
-                    rollout_data, actions, cost_advantages, old_log_prob, backwards=backwards, curr_loss=curr_loss
+                # Compute losses
+                loss_act, linear_loss, bregman_div_loss = self.compute_actor_loss(
+                    rollout_data, actions, advantages, old_log_prob
                 )
+                loss_critic = self.compute_critic_loss(rollout_data, actions)
+                loss_cost_critic = self.compute_cost_critic_loss(rollout_data, actions)
 
-                closure_critic = lambda backwards, curr_loss: self.compute_critic_loss(
-                    rollout_data, actions, backwards=backwards, curr_loss=curr_loss
-                )
+                # Backward pass for actor
+                self.policy.optimizer_act.zero_grad()
+                loss_act.backward()
+                grad_list_actor = get_grad_list(self.policy.params_act)
+                grad_norm_actor = compute_grad_norm(grad_list_actor)
 
-                closure_cost_critic = lambda backwards, curr_loss: self.compute_cost_critic_loss(
-                    rollout_data, actions, backwards=backwards, curr_loss=curr_loss
-                )
-                # compute the actor loss.
-                loss_act, linear_loss, bregman_div_loss = closure_actor(backwards=False, curr_loss=None)
+                # Backward pass for critic
+                self.policy.optimizer_critic.zero_grad()
+                loss_critic.backward()
+                grad_list_critic = get_grad_list(self.policy.params_critic)
+                grad_norm_critic = compute_grad_norm(grad_list_critic)
 
-                # compute the critic loss.
-                loss_critic, _, _ = closure_critic(backwards=False, curr_loss=None)
-                loss_cost_critic, _, _ = closure_cost_critic(backwards=False, curr_loss=None)
+                # Backward pass for critic
+                self.policy.optimizer_cost_critic.zero_grad()
+                loss_cost_critic.backward()
+                grad_list_cost_critic = get_grad_list(self.policy.params_cost_critic)
+                grad_norm_cost_critic = compute_grad_norm(grad_list_cost_critic)
 
-                # backward pass.
-                closure_actor(backwards=True, curr_loss=loss_act)
-                closure_critic(backwards=True, curr_loss=loss_critic)
-                closure_cost_critic(backwards=True, curr_loss=loss_cost_critic)
-
-                # using armijo vs adam for actor and critic.
-                grad_list = get_grad_list(self.policy.params_act)
-                grad_norm_actor = compute_grad_norm(grad_list)
+                # Update actor parameters
                 if self.use_armijo_actor:
-                    # armijo for actor.
+                    # Create closure for Armijo line search
+                    actor_closure = self._create_actor_closure(rollout_data, actions, advantages, old_log_prob)
                     alpha_actor = armijo_search(
-                        closure_actor, self.policy.params_act, grad_list, grad_norm_actor, alpha_max_actor, self.c_actor
+                        actor_closure, self.policy.params_act, grad_list_actor, grad_norm_actor, alpha_max_actor, self.c_actor
                     )
                     alpha_max_actor = alpha_actor * 1.8
-
                 else:
                     self.policy.optimizer_act.step()
 
-                grad_list = get_grad_list(self.policy.params_critic)
-                grad_norm_critic = compute_grad_norm(grad_list)
+                # Update critic parameters
                 if self.use_armijo_critic:
-                    # armijo for critic.
+                    # Create closure for Armijo line search
+                    critic_closure = self._create_critic_closure(rollout_data, actions)
                     alpha_critic = armijo_search(
-                        closure_critic, self.policy.params_critic, grad_list, grad_norm_critic, alpha_max_critic, self.c_critic
+                        critic_closure,
+                        self.policy.params_critic,
+                        grad_list_critic,
+                        grad_norm_critic,
+                        alpha_max_critic,
+                        self.c_critic,
                     )
                     alpha_max_critic = alpha_critic * 1.8
-                else:
-                    self.policy.optimizer_critic.step()
 
-                grad_list = get_grad_list(self.policy.params_cost_critic)
-                grad_norm_cost_critic = compute_grad_norm(grad_list)
-                if self.use_armijo_critic:
-                    # armijo for critic.
-                    alpha_critic = armijo_search(
-                        closure_cost_critic, self.policy.params_cost_critic, grad_list, grad_norm_cost_critic, alpha_max_critic, self.c_critic
+                    cost_critic_closure = self._create_cost_critic_closure(rollout_data, actions)
+                    alpha_cost_critic = armijo_search(
+                        cost_critic_closure,
+                        self.policy.params_cost_critic,
+                        grad_list_cost_critic,
+                        grad_norm_cost_critic,
+                        alpha_max_cost_critic,
+                        self.c_critic,
                     )
-                    alpha_max_critic = alpha_critic * 1.8
+                    alpha_max_cost_critic = alpha_cost_critic * 1.8
+
                 else:
                     self.policy.optimizer_cost_critic.step()
-
-
 
             self._n_updates += 1
 
@@ -398,6 +467,7 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         self.logger.record("train/bregman_div_loss", np.mean(bregman_div_losses))
         self.logger.record("train/loss_actor", loss_act.item())
         self.logger.record("train/loss_critic", loss_critic.item())
+        self.logger.record("train/loss_cost_critic", loss_cost_critic.item())
         if hasattr(self.policy, "log_std"):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")

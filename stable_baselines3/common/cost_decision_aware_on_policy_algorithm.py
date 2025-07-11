@@ -13,7 +13,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 from stable_baselines3.common.cost_decision_aware_policies import CostDecisionAwareActorCriticPolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
-from stable_baselines3.common.utils import obs_as_tensor, safe_mean
+from stable_baselines3.common.utils import obs_as_tensor, safe_mean, update_learning_rate
 from stable_baselines3.common.vec_env import VecEnv
 
 from stable_baselines3.common.cost_buffers import CostRolloutBuffer
@@ -111,6 +111,32 @@ class CostDecisionAwareOnPolicyAlgorithm(DecisionAwareOnPolicyAlgorithm):
 
         # Warn when not using CPU with MlpPolicy
         self._maybe_recommend_cpu()
+
+    def _update_learning_rate(self, optimizers: Union[list[th.optim.Optimizer], th.optim.Optimizer]) -> None:
+        """
+        Update the optimizers learning rate using the current learning rate schedule
+        and the current progress remaining (from 1 to 0).
+
+        :param optimizers:
+            An optimizer or a list of optimizers.
+        """
+        # Log the current learning rate
+        self.logger.record("train/learning_rate_actor", self.lr_schedule_actor(self._current_progress_remaining))
+        self.logger.record("train/learning_rate_critic", self.lr_schedule_critic(self._current_progress_remaining))
+        self.logger.record("train/learning_rate_cost_critic", self.lr_schedule_critic(self._current_progress_remaining))
+
+
+        if not isinstance(optimizers, list):
+            optimizers = [optimizers]
+        for opt_name, optimizer in optimizers:
+            if opt_name == 'actor':
+                update_learning_rate(optimizer, self.lr_schedule_actor(self._current_progress_remaining))
+            elif opt_name == 'critic':
+                update_learning_rate(optimizer, self.lr_schedule_critic(self._current_progress_remaining))
+            elif opt_name == 'cost_critic':
+                update_learning_rate(optimizer, self.lr_schedule_critic(self._current_progress_remaining))
+            else:
+                raise ValueError(f"Unknown optimizer name: {opt_name}")
 
     def collect_rollouts(
         self,
