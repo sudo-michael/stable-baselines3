@@ -55,6 +55,7 @@ class Monitor(gym.Wrapper[ObsType, ActType, ObsType, ActType]):
         self.rewards: list[float] = []
         self.needs_reset = True
         self.episode_returns: list[float] = []
+        self.episode_costs: list[float] = []
         self.episode_lengths: list[int] = []
         self.episode_times: list[float] = []
         self.total_steps = 0
@@ -74,6 +75,7 @@ class Monitor(gym.Wrapper[ObsType, ActType, ObsType, ActType]):
                 "wrap your env with Monitor(env, path, allow_early_resets=True)"
             )
         self.rewards = []
+        self.costs = []
         self.needs_reset = False
         for key in self.reset_keywords:
             value = kwargs.get(key)
@@ -93,14 +95,17 @@ class Monitor(gym.Wrapper[ObsType, ActType, ObsType, ActType]):
             raise RuntimeError("Tried to step environment that needs reset")
         observation, reward, terminated, truncated, info = self.env.step(action)
         self.rewards.append(float(reward))
+        self.costs.append(float(info.get("cost", 0.0)))
         if terminated or truncated:
             self.needs_reset = True
             ep_rew = sum(self.rewards)
+            ep_cos = sum(self.costs)
             ep_len = len(self.rewards)
-            ep_info = {"r": round(ep_rew, 6), "l": ep_len, "t": round(time.time() - self.t_start, 6)}
+            ep_info = {"r": round(ep_rew, 6), "c": round(ep_cos, 6), "l": ep_len, "t": round(time.time() - self.t_start, 6)}
             for key in self.info_keywords:
                 ep_info[key] = info[key]
             self.episode_returns.append(ep_rew)
+            self.episode_costs.append(ep_cos)
             self.episode_lengths.append(ep_len)
             self.episode_times.append(time.time() - self.t_start)
             ep_info.update(self.current_reset_info)

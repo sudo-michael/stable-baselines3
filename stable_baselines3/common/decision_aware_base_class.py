@@ -827,7 +827,6 @@ class DecisionAwareBaseAlgorithm(ABC):
         """
         state_dicts_names, _ = self._get_torch_save_params()
         params = {}
-        breakpoint()
         for name in state_dicts_names:
             attr = recursive_getattr(self, name)
             # Retrieve state dict
