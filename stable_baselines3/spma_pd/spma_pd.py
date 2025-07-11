@@ -168,48 +168,120 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
     def _setup_model(self) -> None:
         super()._setup_model()
 
-    def compute_actor_loss(self, rollout_data, actions, advantages, old_log_prob, backwards=False, curr_loss=None):
-        # skip recompuing the loss if you already have it and just want to do a backward pass.
-        if curr_loss is None:
-            _, _, log_prob, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
-            log_ratio = log_prob - old_log_prob.detach()
-            linear_loss = -log_ratio * advantages
-            # using approx kl for bregman div from Schulman blog: http://joschu.net/blog/kl-approx.html
-            # approx kl is an unbiased estimator of the true kl but results in less variance.
-            # alternative approach is to use bregman_div_loss = -1/self.eta * log_ratio
-            bregman_div_loss = 1 / self.eta * ((th.exp(log_ratio) - 1) - log_ratio)
-            curr_loss = th.mean(linear_loss + bregman_div_loss)
+    def compute_actor_loss(self, rollout_data, actions, advantages, old_log_prob):
+        """Compute actor loss without backward pass."""
+        _, _, log_prob, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
+        log_ratio = log_prob - old_log_prob.detach()
+        linear_loss = -log_ratio * advantages
+        # using approx kl for bregman div from Schulman blog: http://joschu.net/blog/kl-approx.html
+        # approx kl is an unbiased estimator of the true kl but results in less variance.
+        # alternative approach is to use bregman_div_loss = -1/self.eta * log_ratio
+        bregman_div_loss = 1 / self.eta * ((th.exp(log_ratio) - 1) - log_ratio)
+        total_loss = th.mean(linear_loss + bregman_div_loss)
+        
+        return total_loss, linear_loss, bregman_div_loss
 
-        # backward pass
-        if backwards:
-            self.policy.optimizer_act.zero_grad()
-            curr_loss.backward()
+    def compute_critic_loss(self, rollout_data, actions):
+        """Compute critic loss without backward pass."""
+        # Re-sample the noise matrix because the log_std has changed
+        values, _, _, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
+        values = values.flatten()
+        
+        # critic loss.
+        loss = F.mse_loss(rollout_data.returns, values)
+        return loss
 
-            return curr_loss, None, None
+    def compute_cost_critic_loss(self, rollout_data, actions):
+        """Compute cost critic loss without backward pass."""
+        # Re-sample the noise matrix because the log_std has changed
+        _, cost_values, _, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
+        cost_values = cost_values.flatten()
+        
+        # critic loss.
+        loss = F.mse_loss(rollout_data.cost_returns, cost_values)
+        return loss
 
-        return curr_loss, linear_loss, bregman_div_loss
+    def _create_actor_closure(self, rollout_data, actions, advantages, old_log_prob):
+        """Create a closure for Armijo line search that only handles loss computation."""
+        def closure():
+            return self.compute_actor_loss(rollout_data, actions, advantages, old_log_prob)[0]
+        return closure
 
-    def compute_critic_loss(self, rollout_data, actions, backwards=False, curr_loss=None):
-        if curr_loss is None and backwards:
-            raise ValueError("Can not perform backward pass without curr_loss.")
+    def _create_critic_closure(self, rollout_data, actions):
+        """Create a closure for Armijo line search that only handles loss computation."""
+        def closure():
+            return self.compute_critic_loss(rollout_data, actions)
+        return closure
 
-        # skip recompuing the loss if you already have it and just want to do a backward pass.
-        if curr_loss is None:
-            # Re-sample the noise matrix because the log_std has changed
-            values, _, _, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
-            values = values.flatten()
+    def _create_cost_critic_closure(self, rollout_data, actions):
+        """Create a closure for Armijo line search that only handles loss computation."""
+        def closure():
+            return self.compute_cost_critic_loss(rollout_data, actions)
+        return closure
+    # def compute_actor_loss(self, rollout_data, actions, advantages, old_log_prob, backwards=False, curr_loss=None):
+    #     # skip recompuing the loss if you already have it and just want to do a backward pass.
+    #     if curr_loss is None:
+    #         _, _, log_prob, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
+    #         log_ratio = log_prob - old_log_prob.detach()
+    #         linear_loss = -log_ratio * advantages
+    #         # using approx kl for bregman div from Schulman blog: http://joschu.net/blog/kl-approx.html
+    #         # approx kl is an unbiased estimator of the true kl but results in less variance.
+    #         # alternative approach is to use bregman_div_loss = -1/self.eta * log_ratio
+    #         bregman_div_loss = 1 / self.eta * ((th.exp(log_ratio) - 1) - log_ratio)
+    #         curr_loss = th.mean(linear_loss + bregman_div_loss)
 
-            # critic loss.
-            curr_loss = F.mse_loss(rollout_data.returns, values)
+    #     # backward pass
+    #     if backwards:
+    #         self.policy.optimizer_act.zero_grad()
+    #         curr_loss.backward()
 
-        # backward pass.
-        if backwards:
-            self.policy.optimizer_critic.zero_grad()
-            curr_loss.backward()
+    #         return curr_loss, None, None
 
-            return curr_loss, None, None
+    #     return curr_loss, linear_loss, bregman_div_loss
 
-        return curr_loss, None, None
+    # def compute_critic_loss(self, rollout_data, actions, backwards=False, curr_loss=None):
+    #     if curr_loss is None and backwards:
+    #         raise ValueError("Can not perform backward pass without curr_loss.")
+
+    #     # skip recompuing the loss if you already have it and just want to do a backward pass.
+    #     if curr_loss is None:
+    #         # Re-sample the noise matrix because the log_std has changed
+    #         values, _, _, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
+    #         values = values.flatten()
+
+    #         # critic loss.
+    #         curr_loss = F.mse_loss(rollout_data.returns, values)
+
+    #     # backward pass.
+    #     if backwards:
+    #         self.policy.optimizer_critic.zero_grad()
+    #         curr_loss.backward()
+
+    #         return curr_loss, None, None
+
+    #     return curr_loss, None, None
+
+    # def compute_cost_critic_loss(self, rollout_data, actions, backwards=False, curr_loss=None):
+    #     if curr_loss is None and backwards:
+    #         raise ValueError("Can not perform backward pass without curr_loss.")
+
+    #     # skip recompuing the loss if you already have it and just want to do a backward pass.
+    #     if curr_loss is None:
+    #         # Re-sample the noise matrix because the log_std has changed
+    #         _, cost_values, _, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
+    #         cost_values = cost_values.flatten()
+
+    #         # critic loss.
+    #         curr_loss = F.mse_loss(rollout_data.cost_returns, cost_values)
+
+    #     # backward pass.
+    #     if backwards:
+    #         self.policy.optimizer_cost_critic.zero_grad()
+    #         curr_loss.backward()
+
+    #         return curr_loss, None, None
+
+    #     return curr_loss, None, None
 
     def train(self) -> None:
         """
@@ -217,6 +289,7 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         """
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
+        # TODO inherit 
         self._update_learning_rate([("actor", self.policy.optimizer_act), ("critic", self.policy.optimizer_critic)])
 
         # record losses and number of times the surrogate loss is not decreasing in the inner loop.
@@ -243,12 +316,26 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
                 if self.normalize_advantage and len(advantages) > 1:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
+                # Normalize advantage
+                cost_advantages = rollout_data.cost_advantages
+                # Normalization does not make sense if mini batchsize == 1, see GH issue #325
+                if self.normalize_advantage and len(cost_advantages) > 1:
+                    cost_advantages = (cost_advantages - cost_advantages.mean()) / (cost_advantages.std() + 1e-8)
+
                 # build a closure for the actor and critic.
+                # closure_actor = lambda backwards, curr_loss: self.compute_actor_loss(
+                #     rollout_data, actions, advantages, old_log_prob, backwards=backwards, curr_loss=curr_loss
+                # )
+
                 closure_actor = lambda backwards, curr_loss: self.compute_actor_loss(
-                    rollout_data, actions, advantages, old_log_prob, backwards=backwards, curr_loss=curr_loss
+                    rollout_data, actions, cost_advantages, old_log_prob, backwards=backwards, curr_loss=curr_loss
                 )
 
                 closure_critic = lambda backwards, curr_loss: self.compute_critic_loss(
+                    rollout_data, actions, backwards=backwards, curr_loss=curr_loss
+                )
+
+                closure_cost_critic = lambda backwards, curr_loss: self.compute_cost_critic_loss(
                     rollout_data, actions, backwards=backwards, curr_loss=curr_loss
                 )
                 # compute the actor loss.
@@ -256,10 +343,12 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
 
                 # compute the critic loss.
                 loss_critic, _, _ = closure_critic(backwards=False, curr_loss=None)
+                loss_cost_critic, _, _ = closure_cost_critic(backwards=False, curr_loss=None)
 
                 # backward pass.
                 closure_actor(backwards=True, curr_loss=loss_act)
                 closure_critic(backwards=True, curr_loss=loss_critic)
+                closure_cost_critic(backwards=True, curr_loss=loss_cost_critic)
 
                 # using armijo vs adam for actor and critic.
                 grad_list = get_grad_list(self.policy.params_act)
@@ -273,7 +362,6 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
 
                 else:
                     self.policy.optimizer_act.step()
-                    self.policy.optimizer_act.step()
 
                 grad_list = get_grad_list(self.policy.params_critic)
                 grad_norm_critic = compute_grad_norm(grad_list)
@@ -285,6 +373,19 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
                     alpha_max_critic = alpha_critic * 1.8
                 else:
                     self.policy.optimizer_critic.step()
+
+                grad_list = get_grad_list(self.policy.params_cost_critic)
+                grad_norm_cost_critic = compute_grad_norm(grad_list)
+                if self.use_armijo_critic:
+                    # armijo for critic.
+                    alpha_critic = armijo_search(
+                        closure_cost_critic, self.policy.params_cost_critic, grad_list, grad_norm_cost_critic, alpha_max_critic, self.c_critic
+                    )
+                    alpha_max_critic = alpha_critic * 1.8
+                else:
+                    self.policy.optimizer_cost_critic.step()
+
+
 
             self._n_updates += 1
 
