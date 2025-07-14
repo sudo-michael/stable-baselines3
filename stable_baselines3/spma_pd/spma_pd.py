@@ -4,135 +4,24 @@ from typing import Any, ClassVar, Optional, TypeVar, Union
 
 
 import numpy as np
-from stable_baselines3.common.cost_decision_aware_policies import CostDecisionAwareActorCriticPolicy
+from stable_baselines3.common.cost_decision_aware_policies import (
+    CostDecisionAwareActorCriticPolicy,
+)
 import torch as th
 from gymnasium import spaces
 from torch.nn import functional as F
 
 from stable_baselines3.common.cost_buffers import CostRolloutBuffer
-from stable_baselines3.common.cost_decision_aware_on_policy_algorithm import CostDecisionAwareOnPolicyAlgorithm
+from stable_baselines3.common.cost_decision_aware_on_policy_algorithm import (
+    CostDecisionAwareOnPolicyAlgorithm,
+)
 from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
-from stable_baselines3.common.utils import get_grad_list, compute_grad_norm, armijo_search
+from stable_baselines3.common.utils import get_grad_list, compute_grad_norm, armijo_search, safe_mean
+from stable_baselines3.common.lagrange import Lagrange
+from collections import deque
 
 SelfSPMAPD = TypeVar("SelfSPMA", bound="SPMAPD")
-
-class Lagrange:
-    """Base class for Lagrangian-base Algorithms.
-    src: https://github.com/PKU-Alignment/omnisafe/blob/main/omnisafe/common/lagrange.py
-
-    This class implements the Lagrange multiplier update and the Lagrange loss.
-
-    ..  note::
-        Any traditional policy gradient algorithm can be converted to a Lagrangian-based algorithm
-        by inheriting from this class and implementing the :meth:`_loss_pi` method.
-
-    Examples:
-        >>> from omnisafe.common.lagrange import Lagrange
-        >>> def loss_pi(self, data):
-        ...     # implement your own loss function here
-        ...     return loss
-
-    You can also inherit this class to implement your own Lagrangian-based algorithm, with any
-    policy gradient method you like in OmniSafe.
-
-    Examples:
-        >>> from omnisafe.common.lagrange import Lagrange
-        >>> class CustomAlgo:
-        ...     def __init(self) -> None:
-        ...         # initialize your own algorithm here
-        ...         super().__init__()
-        ...         # initialize the Lagrange multiplier
-        ...         self.lagrange = Lagrange(**self._cfgs.lagrange_cfgs)
-
-    Args:
-        cost_limit (float): The cost limit.
-        lagrangian_multiplier_init (float): The initial value of the Lagrange multiplier.
-        lambda_lr (float): The learning rate of the Lagrange multiplier.
-        lambda_optimizer (str): The optimizer for the Lagrange multiplier.
-        lagrangian_upper_bound (float or None, optional): The upper bound of the Lagrange multiplier.
-            Defaults to None.
-
-    Attributes:
-        cost_limit (float): The cost limit.
-        lambda_lr (float): The learning rate of the Lagrange multiplier.
-        lagrangian_upper_bound (float, optional): The upper bound of the Lagrange multiplier.
-            Defaults to None.
-        lagrangian_multiplier (torch.nn.Parameter): The Lagrange multiplier.
-        lambda_range_projection (torch.nn.ReLU): The projection function for the Lagrange multiplier.
-    """
-
-    # pylint: disable-next=too-many-arguments
-    def __init__(
-        self,
-        cost_limit: float,
-        lagrangian_multiplier_init: float,
-        lambda_lr: float,
-        lambda_optimizer: str,
-        lagrangian_upper_bound: float | None = None,
-    ) -> None:
-        """Initialize an instance of :class:`Lagrange`."""
-        self.cost_limit: float = cost_limit
-        self.lambda_lr: float = lambda_lr
-        self.lagrangian_upper_bound: float | None = lagrangian_upper_bound
-
-        init_value = max(lagrangian_multiplier_init, 0.0)
-        self.lagrangian_multiplier: th.nn.Parameter = th.nn.Parameter(
-            th.as_tensor(init_value),
-            requires_grad=True,
-        )
-        self.lambda_range_projection: th.nn.ReLU = th.nn.ReLU()
-        # fetch optimizer from PyTorch optimizer package
-        assert hasattr(
-            th.optim,
-            lambda_optimizer,
-        ), f'Optimizer={lambda_optimizer} not found in torch.'
-        torch_opt = getattr(th.optim, lambda_optimizer)
-        self.lambda_optimizer: th.optim.Optimizer = torch_opt(
-            [
-                self.lagrangian_multiplier,
-            ],
-            lr=lambda_lr,
-        )
-
-    def compute_lambda_loss(self, mean_ep_cost: float) -> th.Tensor:
-        """Penalty loss for Lagrange multiplier.
-
-        .. note::
-            ``mean_ep_cost`` is obtained from ``self.logger.get_stats('EpCosts')[0]``, which is
-            already averaged across MPI processes.
-
-        Args:
-            mean_ep_cost (float): mean episode cost.
-
-        Returns:
-            Penalty loss for Lagrange multiplier.
-        """
-        return -self.lagrangian_multiplier * (mean_ep_cost - self.cost_limit)
-
-    def update_lagrange_multiplier(self, Jc: float) -> None:
-        r"""Update Lagrange multiplier (lambda).
-
-        We update the Lagrange multiplier by minimizing the penalty loss, which is defined as:
-
-        .. math::
-
-            \lambda ^{'} = \lambda + \eta \cdot (J_C - J_C^*)
-
-        where :math:`\lambda` is the Lagrange multiplier, :math:`\eta` is the learning rate,
-        :math:`J_C` is the mean episode cost, and :math:`J_C^*` is the cost limit.
-
-        Args:
-            Jc (float): mean episode cost.
-        """
-        self.lambda_optimizer.zero_grad()
-        lambda_loss = self.compute_lambda_loss(Jc)
-        lambda_loss.backward()
-        self.lambda_optimizer.step()
-        self.lagrangian_multiplier.data.clamp_(
-            0.0,
-            self.lagrangian_upper_bound,
-        )  # enforce: lambda in [0, inf]
 
 
 class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
@@ -196,7 +85,7 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         sde_sample_freq: int = -1,
         rollout_buffer_class: Optional[type[CostRolloutBuffer]] = None,
         rollout_buffer_kwargs: Optional[dict[str, Any]] = None,
-        stats_window_size: int = 100,
+        stats_window_size: int = 100_000,
         tensorboard_log: Optional[str] = None,
         policy_kwargs: Optional[dict[str, Any]] = None,
         verbose: int = 0,
@@ -210,6 +99,11 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         c_actor: float = 0.1,
         c_critic: float = 1e-6,
         eta: float = 1.0,
+        cost_limit=40,
+        lagrangian_multiplier_init: float = 0.001,
+        lambda_lr: float = 0.3,
+        lambda_optimizer: str = "Adam",
+        lagrangian_upper_bound: float = 100,
     ):
         super().__init__(
             policy,
@@ -280,15 +174,23 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         self.softmax_rep = True
 
         if _init_setup_model:
+            self.lagrange = Lagrange(
+                cost_limit=cost_limit,
+                lagrangian_multiplier_init=lagrangian_multiplier_init,
+                lambda_lr=lambda_lr,
+                lambda_optimizer=lambda_optimizer,
+                lagrangian_upper_bound=lagrangian_upper_bound,
+            )
             self._setup_model()
 
     def _setup_model(self) -> None:
         super()._setup_model()
 
-    def compute_actor_loss(self, rollout_data, actions, advantages, old_log_prob):
+    def compute_actor_loss(self, rollout_data, actions, advantages, cost_advantages, old_log_prob):
         """Compute actor loss without backward pass."""
         _, _, log_prob, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
         log_ratio = log_prob - old_log_prob.detach()
+        # linear_loss = -log_ratio * (advantages + self.lagrange.lagrangian_multiplier.item() * cost_advantages)
         linear_loss = -log_ratio * advantages
         # using approx kl for bregman div from Schulman blog: http://joschu.net/blog/kl-approx.html
         # approx kl is an unbiased estimator of the true kl but results in less variance.
@@ -318,11 +220,11 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         loss = F.mse_loss(rollout_data.cost_returns, cost_values)
         return loss
 
-    def _create_actor_closure(self, rollout_data, actions, advantages, old_log_prob):
+    def _create_actor_closure(self, rollout_data, actions, advantages, cost_advantages, old_log_prob):
         """Create a closure for Armijo line search that only handles loss computation."""
 
         def closure():
-            return self.compute_actor_loss(rollout_data, actions, advantages, old_log_prob)[0]
+            return self.compute_actor_loss(rollout_data, actions, advantages, cost_advantages, old_log_prob)[0]
 
         return closure
 
@@ -394,7 +296,7 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
                 # )
                 # Compute losses
                 loss_act, linear_loss, bregman_div_loss = self.compute_actor_loss(
-                    rollout_data, actions, advantages, old_log_prob
+                    rollout_data, actions, cost_advantages, cost_advantages, old_log_prob
                 )
                 loss_critic = self.compute_critic_loss(rollout_data, actions)
                 loss_cost_critic = self.compute_cost_critic_loss(rollout_data, actions)
@@ -422,7 +324,12 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
                     # Create closure for Armijo line search
                     actor_closure = self._create_actor_closure(rollout_data, actions, advantages, old_log_prob)
                     alpha_actor = armijo_search(
-                        actor_closure, self.policy.params_act, grad_list_actor, grad_norm_actor, alpha_max_actor, self.c_actor
+                        actor_closure,
+                        self.policy.params_act,
+                        grad_list_actor,
+                        grad_norm_actor,
+                        alpha_max_actor,
+                        self.c_actor,
                     )
                     alpha_max_actor = alpha_actor * 1.8
                 else:
@@ -472,20 +379,84 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
 
+    def dual_update(self):
+        assert len(self.ep_info_buffer) > 0
+        Jc = safe_mean([ep_info["c"] for ep_info in self.ep_info_buffer])
+
+        print(f'{Jc=}')
+        print(f'Lag before update: {self.lagrange.lagrangian_multiplier.item()}')
+        self.lagrange.update_lagrange_multiplier(Jc)
+        print(f'Lag after update: {self.lagrange.lagrangian_multiplier.item()}')
+        self.logger.record("train/lagrange_multiplier", self.lagrange.lagrangian_multiplier.item())
+
+
+
     def learn(
         self: SelfSPMAPD,
         total_timesteps: int,
+        inner_timesteps: int,
         callback: MaybeCallback = None,
         log_interval: int = 1,
         tb_log_name: str = "SPMAPD",
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
     ) -> SelfSPMAPD:
-        return super().learn(
-            total_timesteps=total_timesteps,
-            callback=callback,
-            log_interval=log_interval,
-            tb_log_name=tb_log_name,
-            reset_num_timesteps=reset_num_timesteps,
-            progress_bar=progress_bar,
+        assert inner_timesteps % self.n_steps * self.n_envs == 0
+        assert total_timesteps % inner_timesteps == 0
+
+        num_inner_updates = total_timesteps // inner_timesteps
+        print(f"number of inner_updates: {num_inner_updates}")
+
+        iteration = 0
+
+        total_timesteps, callback = self._setup_learn(
+            total_timesteps,
+            callback,
+            reset_num_timesteps,
+            tb_log_name,
+            progress_bar,
         )
+
+        callback.on_training_start(locals(), globals())
+
+        assert self.env is not None
+
+        while self.num_timesteps < total_timesteps:
+            for k in range(num_inner_updates):
+                continue_training = self.collect_rollouts(
+                    self.env,
+                    callback,
+                    self.rollout_buffer,
+                    n_rollout_steps=self.n_steps,
+                )
+                if not continue_training:
+                    break
+
+                iteration += 1
+                self._update_current_progress_remaining(self.num_timesteps, total_timesteps)
+
+                # # Display training infos
+                # if log_interval is not None and iteration % log_interval == 0 and k != num_inner_updates - 1:
+                #     assert self.ep_info_buffer is not None
+                #     self.dump_logs(iteration)
+
+                self.train()
+
+
+            if not continue_training:
+                break
+
+            self.dual_update()
+
+            if log_interval is not None and iteration % log_interval == 0:
+                assert self.ep_info_buffer is not None
+                self.dump_logs(iteration)
+
+
+            # reset buffers
+            self.ep_info_buffer = deque(maxlen=self._stats_window_size)
+            self.ep_success_buffer = deque(maxlen=self._stats_window_size)
+
+        callback.on_training_end()
+
+        return self
