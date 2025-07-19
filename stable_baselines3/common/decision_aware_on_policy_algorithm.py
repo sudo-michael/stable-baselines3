@@ -307,6 +307,7 @@ class DecisionAwareOnPolicyAlgorithm(DecisionAwareBaseAlgorithm):
         self.logger.record("time/iterations", iteration, exclude="tensorboard")
         if len(self.ep_info_buffer) > 0 and len(self.ep_info_buffer[0]) > 0:
             self.logger.record("rollout/ep_rew_mean", safe_mean([ep_info["r"] for ep_info in self.ep_info_buffer]))
+            self.logger.record("rollout/ep_cos_mean", safe_mean([ep_info["c"] for ep_info in self.ep_info_buffer]))
             self.logger.record("rollout/ep_len_mean", safe_mean([ep_info["l"] for ep_info in self.ep_info_buffer]))
         self.logger.record("time/fps", fps)
         self.logger.record("time/time_elapsed", int(time_elapsed), exclude="tensorboard")
@@ -339,7 +340,9 @@ class DecisionAwareOnPolicyAlgorithm(DecisionAwareBaseAlgorithm):
         assert self.env is not None
 
         while self.num_timesteps < total_timesteps:
+            print(f"starting collecting rollout: {self.num_timesteps=}")
             continue_training = self.collect_rollouts(self.env, callback, self.rollout_buffer, n_rollout_steps=self.n_steps)
+            print(f"done collecting rollout: {self.num_timesteps=}")
 
             if not continue_training:
                 break
@@ -352,6 +355,7 @@ class DecisionAwareOnPolicyAlgorithm(DecisionAwareBaseAlgorithm):
                 assert self.ep_info_buffer is not None
                 self.dump_logs(iteration)
 
+            print(f'traning at step: {self.num_timesteps}')
             self.train()
 
         callback.on_training_end()

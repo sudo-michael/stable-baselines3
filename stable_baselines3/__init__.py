@@ -10,6 +10,7 @@ from stable_baselines3.sac import SAC
 from stable_baselines3.td3 import TD3
 from stable_baselines3.spma import SPMA
 from stable_baselines3.spma_pd import SPMAPD
+from stable_baselines3.spma_alm import SPMAALM
 
 
 # Read version from file
@@ -25,4 +26,4 @@ def HER(*args, **kwargs):
     )
 
 
-__all__ = ["A2C", "DDPG", "DQN", "PPO", "SAC", "TD3", "HerReplayBuffer", "get_system_info", "SPMASPMAPD"]
+__all__ = ["A2C", "DDPG", "DQN", "PPO", "SAC", "TD3", "HerReplayBuffer", "get_system_info", "SPMA", "SPMAPD", "SPMAALM"]

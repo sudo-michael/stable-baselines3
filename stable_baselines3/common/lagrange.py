@@ -95,9 +95,10 @@ class Lagrange:
             Penalty loss for Lagrange multiplier.
 
         """
-        return self.lagrangian_multiplier * (mean_ep_cost - self.cost_limit)
+        return -self.lagrangian_multiplier * (mean_ep_cost - self.cost_limit)
 
     def update_lagrange_multiplier(self, Jc: float) -> None:
+
         r"""Update Lagrange multiplier (lambda).
 
         We update the Lagrange multiplier by minimizing the penalty loss, which is defined as:
@@ -120,3 +121,9 @@ class Lagrange:
             0.0,
             self.lagrangian_upper_bound,
         )  # enforce: lambda in [0, inf]
+
+
+    def update_lagrange_alm(self, Jc: float, tau) -> None:
+        lmbda = self.lagrangian_multiplier.item()
+        lmbda_tp1 = lmbda - tau * (self.cost_limit - Jc)
+        self.lagrangian_multiplier.data.fill_(max(lmbda_tp1, 0))

@@ -26,10 +26,10 @@ from stable_baselines3.common.utils import (
 from stable_baselines3.common.lagrange import Lagrange
 from collections import deque
 
-SelfSPMAPD = TypeVar("SelfSPMA", bound="SPMAPD")
+SelfSPMAALM = TypeVar("SelfSPMA", bound="SPMAALM")
 
 
-class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
+class SPMAALM(CostDecisionAwareOnPolicyAlgorithm):
     """
     Softmax Policy Mirror Ascent algorithm (SPMA)
 
@@ -108,6 +108,7 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         lambda_lr: float = 0.01,
         lambda_optimizer: str = "SGD",
         lagrangian_upper_bound: float = 100,
+        tau: float = 0.1,
     ):
         super().__init__(
             policy,
@@ -176,6 +177,7 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         self.c_critic = c_critic
         self.explained_var_old = 0
         self.softmax_rep = True
+        self.tau = tau
 
         if _init_setup_model:
             self.lagrange = Lagrange(
@@ -197,6 +199,10 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         advantages,
         cost_advantages,
         old_log_prob,
+        Jc,
+        b,
+        lmbda,
+        tau,
         backwards=False,
         curr_loss=None,
     ):
@@ -204,8 +210,12 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         if curr_loss is None:
             _, _, log_prob, _ = self.policy.evaluate_actions(rollout_data.observations, actions)
             log_ratio = log_prob - old_log_prob.detach()
-            linear_loss = -log_ratio * (advantages - self.lagrange.lagrangian_multiplier.item() * cost_advantages)
-            # using approx kl for bregman div from Schulman blog: http://joschu.net/blog/kl-approx.html
+
+            if b >= Jc + lmbda / tau:
+                linear_loss = -log_ratio * advantages
+            else:
+                linear_loss = -log_ratio * (advantages - cost_advantages * (Jc - b + lmbda / tau) * tau)
+            # # using approx kl for bregman div from Schulman blog: http://joschu.net/blog/kl-approx.html
             # approx kl is an unbiased estimator of the true kl but results in less variance.
             # alternative approach is to use bregman_div_loss = -1/self.eta * log_ratio
             bregman_div_loss = 1 / self.eta * ((th.exp(log_ratio) - 1) - log_ratio)
@@ -288,6 +298,13 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         alpha_actor = 1.0
         alpha_critic = 1.0
         alpha_cost_critic = 1.0
+        
+        Jc = safe_mean([ep_info["c"] for ep_info in self.ep_info_buffer])
+        b = self.lagrange.cost_limit
+        lmbda = self.lagrange.lagrangian_multiplier.item()
+        tau = self.tau
+        print(f"traing step: {Jc=}, actor is only maximizing reward: {b >= Jc + lmbda / tau} {lmbda=}, {tau=}")
+        
         for epoch in range(self.n_epochs):
             # Do a complete pass on the rollout buffer
             for batch_idx, rollout_data in enumerate(self.rollout_buffer.get(self.batch_size)):
@@ -306,7 +323,9 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
 
                 cost_advantages = rollout_data.cost_advantages
                 if self.normalize_advantage and len(cost_advantages) > 1:
-                    cost_advantages = (cost_advantages - cost_advantages.mean()) / (cost_advantages.std() + 1e-8)
+                    cost_advGantages = (cost_advantages - cost_advantages.mean()) / (cost_advantages.std() + 1e-8)
+
+                assert len(self.ep_info_buffer) > 0
 
                 # build a closure for the actor and critic.
                 def closure_actor(backwards, curr_loss):
@@ -316,6 +335,10 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
                         advantages,
                         cost_advantages,
                         old_log_prob,
+                        Jc,
+                        b,
+                        self.lagrange.lagrangian_multiplier.item(),
+                        self.tau,
                         backwards=backwards,
                         curr_loss=curr_loss,
                     )
@@ -381,10 +404,10 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
                         self.policy.params_cost_critic,
                         grad_list,
                         grad_norm_cost_critic,
-                        alpha_max_critic,
+                        alpha_max_cost_critic,
                         self.c_critic,
                     )
-                    alpha_max_critic = alpha_critic * 1.8
+                    alpha_max_cost_critic = alpha_cost_critic * 1.8
                 else:
                     self.policy.optimizer_cost_critic.step()
 
@@ -408,22 +431,21 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
         assert len(self.ep_info_buffer) > 0
         Jc = safe_mean([ep_info["c"] for ep_info in self.ep_info_buffer])
 
-        # print(f"{Jc=}")
-        print(f"{Jc=} Lag before update: {self.lagrange.lagrangian_multiplier.item()}")
-        self.lagrange.update_lagrange_multiplier(Jc)
-        print(f"Lag after update: {self.lagrange.lagrangian_multiplier.item()}")
+        # print(f"{Jc=} Lag before update: {self.lagrange.lagrangian_multiplier.item()}")
+        self.lagrange.update_lagrange_alm(Jc, self.tau)
+        # print(f"Lag after update: {self.lagrange.lagrangian_multiplier.item()}")
         self.logger.record("train/lagrange_multiplier", self.lagrange.lagrangian_multiplier.item())
 
     def learn(
-        self: SelfSPMAPD,
+        self: SelfSPMAALM,
         total_timesteps: int,
         num_inner_updates: int,
         callback: MaybeCallback = None,
         log_interval: int = 1,
-        tb_log_name: str = "SPMAPD",
+        tb_log_name: str = "SPMAALM",
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
-    ) -> SelfSPMAPD:
+    ) -> SelfSPMAALM:
         iteration = 0
 
         total_timesteps, callback = self._setup_learn(
@@ -452,20 +474,22 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
                 iteration += 1
                 self._update_current_progress_remaining(self.num_timesteps, total_timesteps)
 
+                if k == num_inner_updates - 1 and iteration > num_inner_updates:
+                    self.dual_update()
+
+                # print(f"training at steps: {self.num_timesteps}")
                 self.train()
+
+                # reset buffers
+                self.ep_info_buffer = deque(maxlen=self._stats_window_size)
+                self.ep_success_buffer = deque(maxlen=self._stats_window_size)
 
             if not continue_training:
                 break
 
-            self.dual_update()
-
             if log_interval is not None and iteration % log_interval == 0:
                 assert self.ep_info_buffer is not None
                 self.dump_logs(iteration)
-
-            # reset buffers
-            self.ep_info_buffer = deque(maxlen=self._stats_window_size)
-            self.ep_success_buffer = deque(maxlen=self._stats_window_size)
 
         callback.on_training_end()
 
