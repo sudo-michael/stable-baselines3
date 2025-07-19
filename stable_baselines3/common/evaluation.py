@@ -76,6 +76,7 @@ def evaluate_policy(
 
     n_envs = env.num_envs
     episode_rewards = []
+    episode_costs = []
     episode_lengths = []
 
     episode_counts = np.zeros(n_envs, dtype="int")
@@ -83,6 +84,7 @@ def evaluate_policy(
     episode_count_targets = np.array([(n_eval_episodes + i) // n_envs for i in range(n_envs)], dtype="int")
 
     current_rewards = np.zeros(n_envs)
+    current_costs = np.zeros(n_envs)
     current_lengths = np.zeros(n_envs, dtype="int")
     observations = env.reset()
     states = None
@@ -118,14 +120,17 @@ def evaluate_policy(
                             # Monitor wrapper includes "episode" key in info if environment
                             # has been wrapped with it. Use those rewards instead.
                             episode_rewards.append(info["episode"]["r"])
+                            episode_costs.append(info["episode"]["c"])
                             episode_lengths.append(info["episode"]["l"])
                             # Only increment at the real end of an episode
                             episode_counts[i] += 1
                     else:
                         episode_rewards.append(current_rewards[i])
+                        episode_costs.append(current_costs[i])
                         episode_lengths.append(current_lengths[i])
                         episode_counts[i] += 1
                     current_rewards[i] = 0
+                    current_costs[i] = 0
                     current_lengths[i] = 0
 
         observations = new_observations
@@ -135,8 +140,11 @@ def evaluate_policy(
 
     mean_reward = np.mean(episode_rewards)
     std_reward = np.std(episode_rewards)
+    
+    mean_cost = np.mean(episode_costs)
+    std_cost = np.std(episode_costs)
     if reward_threshold is not None:
         assert mean_reward > reward_threshold, "Mean reward below threshold: " f"{mean_reward:.2f} < {reward_threshold:.2f}"
     if return_episode_rewards:
         return episode_rewards, episode_lengths
-    return mean_reward, std_reward
+    return mean_reward, std_reward, mean_cost, std_cost

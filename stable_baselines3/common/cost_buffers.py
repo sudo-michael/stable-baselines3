@@ -510,7 +510,7 @@ class CostRolloutBuffer(CostBaseBuffer):
             self.cost_advantages[step] = last_gae_lam
         # TD(lambda) estimator, see Github PR #375 or "Telescoping in TD(lambda)"
         # in David Silver Lecture 4: https://www.youtube.com/watch?v=PnHCvfgC_ZA
-        self.cost_returns = self.advantages + self.cost_values
+        self.cost_returns = self.cost_advantages + self.cost_values
 
     def add(
         self,

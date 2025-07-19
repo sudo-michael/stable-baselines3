@@ -1,44 +1,3 @@
-# import safe_simple_gymnasium
-# import gymnasium as gym
-
-# from stable_baselines3 import SPMAPD
-# from stable_baselines3.common.env_util import make_vec_env
-# from stable_baselines3.common.vec_env import VecVideoRecorder
-
-# # SPMA grid search
-# etas = [0.3, 0.5, 0.7, 0.9, 1.0]
-# # Parallel environments
-# n_steps = 2048
-# n_envs = 4
-# rollout_buffer_size = n_steps * n_envs
-# n_inner_updates = 1
-# n_updates = 100
-# # total number of samples collected
-# total_timesteps = rollout_buffer_size * n_updates
-# # number fo samples collected and used for each inner-optimiztion loop
-# inner_timesteps = total_timesteps // n_inner_updates
-
-# for eta in etas:
-#     vec_env = make_vec_env(
-#         "SafeCartPole-v0",
-#         n_envs=n_envs,
-#         monitor_dir=f"spma_eta_{eta}",
-#     )
-#     model = SPMAPD(
-#         "MlpPolicy",
-#         vec_env,
-#         verbose=1,
-#         n_steps=n_steps,
-#         batch_size=n_steps,
-#         eta=eta,
-#         n_epochs=5,
-#         use_armijo_actor=True,
-#         use_armijo_critic=True,
-#     )
-#     model.learn(total_timesteps=total_timesteps, inner_timesteps=inner_timesteps)
-
-
-import os
 import safe_simple_gymnasium
 import gymnasium as gym
 from gymnasium.spaces import Space
@@ -46,7 +5,7 @@ from typing import Any, Dict, Tuple, Optional
 import warnings
 
 
-from stable_baselines3 import SPMAPD
+from stable_baselines3 import SPMA
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecVideoRecorder
 from stable_baselines3.common.monitor import Monitor
@@ -60,8 +19,9 @@ rollout_buffer_size = n_steps * n_envs
 n_inner_updates = 1
 n_updates = 100
 # total number of samples collected
-total_timesteps = rollout_buffer_size * n_updates * n_inner_updates
+total_timesteps = rollout_buffer_size * n_updates
 # number fo samples collected and used for each inner-optimiztion loop
+inner_timesteps = total_timesteps // n_inner_updates
 
 class RewardInfoSwapWrapper(gym.Wrapper):
     """
@@ -129,20 +89,37 @@ class RewardInfoSwapWrapper(gym.Wrapper):
         return self.env.reset(**kwargs)
 
 
-eta = 0.1
-env = gym.make('SafeCartPole-Arushi-v0')
-# env = RewardInfoSwapWrapper(env, info_key='cost')
-env = Monitor(env, f"spma_pd_eta_{eta}_use_line_search_lag_0.csv")
-model = SPMAPD(
-    "MlpPolicy",
-    env,
-    verbose=1,
-    n_steps=n_steps,
-    batch_size=n_steps,
-    eta=eta,
-    n_epochs=5,
-    use_armijo_actor=True,
-    use_armijo_critic=True,
-)
-model.learn(total_timesteps=total_timesteps, num_inner_updates=n_inner_updates)
+for eta in etas:
+    env = gym.make('SafeCartPole-Arushi-v0')
+    # env = RewardInfoSwapWrapper(env, info_key='cost')
+    env = Monitor(env, f"spma_swap_rc_eta_{eta}_use_line_search")
+    model = SPMA(
+        "MlpPolicy",
+        env,
+        verbose=1,
+        n_steps=n_steps,
+        batch_size=n_steps,
+        eta=eta,
+        n_epochs=5,
+        use_armijo_actor=True,
+        use_armijo_critic=True,
+    )
+    model.learn(total_timesteps=total_timesteps)
 
+
+# for eta in etas:
+#     env = gym.make('SafeCartPole-v0')
+#     env = RewardInfoSwapWrapper(env, info_key='cost')
+#     env = Monitor(env, f"spma_swap_rc_eta_{eta}_use_adam")
+#     model = SPMA(
+#         "MlpPolicy",
+#         env,
+#         verbose=1,
+#         n_steps=n_steps,
+#         batch_size=n_steps,
+#         eta=eta,
+#         n_epochs=5,
+#         use_armijo_actor=False,
+#         use_armijo_critic=False,
+#     )
+#     model.learn(total_timesteps=total_timesteps)

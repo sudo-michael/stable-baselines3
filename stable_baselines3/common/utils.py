@@ -1,3 +1,4 @@
+from copy import deepcopy
 import glob
 import os
 import platform
@@ -705,6 +706,7 @@ def armijo_search(closure, params, grad_list, grad_norm, alpha_max, c, beta=0.9)
             # compute the loss using the prospective step size.
             ctr += 1
             try:
+                # with th.no_grad():
                 next_loss, _, _ = closure(backwards=False, curr_loss=None)
             except ValueError:
                 alpha = alpha * beta
