@@ -63,20 +63,20 @@ if __name__ in "__main__":
             "SafeCartPole-ArushiModify-v0",
         ],
         "algo": {
-            # "SPMA-PD": {
-            #     "eta": [0.3, 0.5, 0.7],
-            #     "n_steps": [2048],
-            #     "batch_size": [2048],
-            #     "total_timesteps": [2048 * 50],
-            #     "num_inner_updates": [1],
-            #     "use_armijo_critic": [True],
-            #     "use_armijo_actor": [True],
-            #     "n_epochs": [10],
-            #     "lambda_lr": [0.1, 0.3, 0.5],
-            #     "cost_limit": [25],
-            # },
+            "SPMA-PD": {
+                "eta": [0.1, 0.3, 0.5],
+                "n_steps": [2048],
+                "batch_size": [2048],
+                "total_timesteps": [2048 * 50],
+                "num_inner_updates": [1],
+                "use_armijo_critic": [True],
+                "use_armijo_actor": [True],
+                "n_epochs": [10],
+                "lambda_lr": [0.1, 0.3, 0.5],
+                "cost_limit": [10],
+            },
             "SPMA-ALM": {
-                "eta": [0.1],
+                "eta": [0.1, 0.3, 0.5],
                 "n_steps": [2048],
                 "batch_size": [2048],
                 "total_timesteps": [2048 * 50],
@@ -84,12 +84,12 @@ if __name__ in "__main__":
                 "use_armijo_critic": [True],
                 "use_armijo_actor": [True],
                 "n_epochs": [10],
-                "cost_limit": [25],
+                "cost_limit": [10],
                 "tau": [0.001, 0.01],
             },
         },
         "seed": [10, 20, 30],
     }
 
-    eg = ExperimentGrid("spma_test_cost_limit_25_4", config)
-    eg.run(train, num_pool=4)
+    eg = ExperimentGrid("spma_test_cost_limit_10", config)
+    eg.run(train, num_pool=6)
