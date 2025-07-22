@@ -463,10 +463,6 @@ class SPMAPD(CostDecisionAwareOnPolicyAlgorithm):
                 assert self.ep_info_buffer is not None
                 self.dump_logs(iteration)
 
-            # reset buffers
-            self.ep_info_buffer = deque(maxlen=self._stats_window_size)
-            self.ep_success_buffer = deque(maxlen=self._stats_window_size)
-
         callback.on_training_end()
 
         return self
