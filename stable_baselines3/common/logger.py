@@ -636,7 +636,7 @@ class Logger:
                 _format.write_sequence(list(map(str, args)))
 
 
-def configure(folder: Optional[str] = None, format_strings: Optional[list[str]] = None) -> Logger:
+def configure(folder: Optional[str] = None, format_strings: Optional[list[str]] = None, log_suffix: str = "SUFFIX") -> Logger:
     """
     Configure the current logger.
 
@@ -653,7 +653,6 @@ def configure(folder: Optional[str] = None, format_strings: Optional[list[str]] 
     assert isinstance(folder, str)
     os.makedirs(folder, exist_ok=True)
 
-    log_suffix = ""
     if format_strings is None:
         format_strings = os.getenv("SB3_LOG_FORMAT", "stdout,log,csv").split(",")
 

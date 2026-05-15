@@ -2,19 +2,31 @@ import os
 import safe_simple_gymnasium
 import gymnasium as gym
 import safety_gymnasium
-from experiment_grid import ExperimentGrid
-from stable_baselines3.common.callbacks import CostEvalCallback
-from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env.dummy_vec_env import DummyVecEnv
-from stable_baselines3.spma.spma import SPMA
 from stable_baselines3.spma_pd.spma_pd import SPMAPD
 from stable_baselines3.spma_alm.spma_alm import SPMAALM
 
+class RolloutCallback(BaseCallback):
+    def __init__(self, verbose: int = 0):
+        super().__init__(verbose)
+        self.rollout_info_buffer = []
+
+    def _on_rollout_start(self) -> None:
+        self.rollout_info_buffer = []
+
+    def _on_step(self) -> bool:
+        infos = self.locals['infos']
+        for idx, info in enumerate(infos):
+            maybe_ep_info = info.get("episode")
+            if maybe_ep_info is not None:
+                self.rollout_info_buffer.extend([maybe_ep_info])
+        return True
 
 def make_env(env_id):
-    if "Cartpole" in env_id:
+    if "CartPole" in env_id:
         env = gym.make(env_id)
     else:
         safe_env = safety_gymnasium.make(env_id)
@@ -58,6 +70,7 @@ def train(
             n_eval_episodes=10,
             deterministic=False,
         )
+        callback=None
     elif algo == "SPMA-ALM":
         model = SPMAALM(
             "MlpPolicy",
@@ -71,48 +84,32 @@ def train(
             n_eval_episodes=10,
             deterministic=False,
         )
+        callback = RolloutCallback()
 
     model.set_logger(logger)
-    model.learn(total_timesteps=total_timesteps, num_inner_updates=num_inner_updates, progress_bar=True)
+    model.learn(total_timesteps=total_timesteps, num_inner_updates=num_inner_updates, callback=callback)
     model.save(os.path.join(exp_log_dir, f"final_model_{seed}"))
 
     return True
 
 
 if __name__ in "__main__":
-    config = {
-        "env_id": [
-            "SafetyHopperVelocity-v1",
-        ],
-        "algo": {
-            "SPMA-PD": {
-                "eta": [0.1, 0.3, 0.5],
-                "n_steps": [2048],
-                "batch_size": [2048],
-                "total_timesteps": [2048 * 200],
-                "num_inner_updates": [1],
-                "use_armijo_critic": [True],
-                "use_armijo_actor": [True],
-                "normalize_cost_advantage": [True, False],
-                "n_epochs": [1, 5, 10],
-                "lambda_lr": [0.1, 0.3, 0.5],
-                "cost_limit": [25],
-            },
-            # "SPMA-ALM": {
-            #     "eta": [0.1, 0.3, 0.5],
-            #     "n_steps": [2048],
-            #     "batch_size": [2048],
-            #     "total_timesteps": [2048 * 250],
-            #     "num_inner_updates": [5],
-            #     "use_armijo_critic": [True],
-            #     "use_armijo_actor": [True],
-            #     "n_epochs": [10],
-            #     "cost_limit": [25],
-            #     "tau": [0.001, 0.01],
-            # },
-        },
-        "seed": [10, 20, 30],
+    # env_id = "SafetyHopperVelocity-v1"
+    env_id = "SafeCartPole-ArushiModify-v0"
+    algo_params = {
+        "eta": 0.1,
+        "n_steps": 2048,
+        "batch_size": 2048,
+        "total_timesteps": 2048 * 50,
+        "num_inner_updates": 5,
+        "use_armijo_critic": True,
+        "use_armijo_actor": True,
+        "n_epochs": 10,
+        "tau": 0.1,
+        "beta": 1.01,
+        "cost_limit": 25,
     }
+    seed = 2
 
-    eg = ExperimentGrid("spma_pd_tmp", config)
-    eg.run(train, num_pool=6)
+    train("test_cartpole", "./test-alm-for-plot/", "SPMA-ALM", env_id, seed, algo_params)
+    # eg.run(train, num_pool=6)

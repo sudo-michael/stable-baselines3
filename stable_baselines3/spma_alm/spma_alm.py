@@ -1,3 +1,4 @@
+import os
 import warnings
 
 from typing import Any, ClassVar, Optional, TypeVar, Union
@@ -7,6 +8,9 @@ import numpy as np
 from stable_baselines3.common.cost_decision_aware_policies import (
     CostDecisionAwareActorCriticPolicy,
 )
+from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.common.vec_env.base_vec_env import VecEnv
+from stable_baselines3.common.vec_env.dummy_vec_env import DummyVecEnv
 import torch as th
 from gymnasium import spaces
 from torch.nn import functional as F
@@ -82,6 +86,7 @@ class SPMAALM(CostDecisionAwareOnPolicyAlgorithm):
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         normalize_advantage: bool = True,
+        normalize_cost_advantage: bool = False,
         ent_coef: float = 0.0,
         vf_coef: float = 0.01,
         max_grad_norm: float = 0.5,
@@ -109,6 +114,10 @@ class SPMAALM(CostDecisionAwareOnPolicyAlgorithm):
         lambda_optimizer: str = "SGD",
         lagrangian_upper_bound: float = 100,
         tau: float = 0.1,
+        beta: float = 0.01,
+        eval_env=None,
+        n_eval_episodes: int = 10,
+        deterministic: bool = False,
     ):
         super().__init__(
             policy,
@@ -168,6 +177,7 @@ class SPMAALM(CostDecisionAwareOnPolicyAlgorithm):
         self.batch_size = batch_size
         self.n_epochs = n_epochs
         self.normalize_advantage = normalize_advantage
+        self.normalize_cost_advantage = normalize_cost_advantage
         self.env_name = env_name
         self.eta = eta
         self.use_armijo_actor = use_armijo_actor
@@ -178,6 +188,7 @@ class SPMAALM(CostDecisionAwareOnPolicyAlgorithm):
         self.explained_var_old = 0
         self.softmax_rep = True
         self.tau = tau
+        self.beta =beta
 
         if _init_setup_model:
             self.lagrange = Lagrange(
@@ -188,6 +199,59 @@ class SPMAALM(CostDecisionAwareOnPolicyAlgorithm):
                 lagrangian_upper_bound=lagrangian_upper_bound,
             )
             self._setup_model()
+
+        if not isinstance(eval_env, VecEnv):
+            eval_env = DummyVecEnv([lambda: eval_env])
+
+        eval_log_path = os.path.join(tensorboard_log, f"evaluations_seed{eval_env.seed()[0]}")
+
+        # Save to npz file
+        if not eval_log_path.endswith(".npz"):
+            eval_log_path = eval_log_path + ".npz"
+
+        self.eval_env = eval_env
+        self.eval_log_path = eval_log_path
+        self.n_eval_episodes = n_eval_episodes
+        self.deteriminstic = deterministic
+
+        self.evaluations_results: list[list[float]] = []
+        self.evaluations_cost_results: list[list[float]] = []
+        self.evaluations_timesteps: list[int] = []
+        self.evaluations_length: list[list[int]] = []
+        self.evaluations_lambda: list[list[int]] = []
+
+    def evaluate(self):
+        # Run the evaluation
+        episode_rewards, episode_costs, episode_lengths = evaluate_policy(
+            self,
+            self.eval_env,
+            n_eval_episodes=self.n_eval_episodes,
+            deterministic=self.deteriminstic,
+            return_episode_rewards=True,
+        )
+
+        mean_reward, std_reward = np.mean(episode_rewards), np.std(episode_rewards)
+        mean_cost, std_cost = np.mean(episode_costs), np.std(episode_costs)
+        mean_ep_length, std_ep_length = np.mean(episode_lengths), np.std(episode_lengths)
+
+        self.logger.record("eval/mean_reward", float(mean_reward))
+        self.logger.record("eval/mean_cost", float(mean_cost))
+        self.logger.record("eval/mean_ep_length", mean_ep_length)
+        self.logger.record("eval/lambda", self.lagrange.lagrangian_multiplier.item())
+
+        self.evaluations_timesteps.append(self.num_timesteps)
+        self.evaluations_results.append(episode_rewards)
+        self.evaluations_cost_results.append(episode_costs)
+        self.evaluations_length.append(episode_lengths)
+
+        # Prepare data for saving
+        np.savez(
+            self.eval_log_path,
+            timesteps=self.evaluations_timesteps,
+            results=self.evaluations_results,
+            costs=self.evaluations_cost_results,
+            ep_lengths=self.evaluations_length,
+        )
 
     def _setup_model(self) -> None:
         super()._setup_model()
@@ -322,8 +386,8 @@ class SPMAALM(CostDecisionAwareOnPolicyAlgorithm):
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
                 cost_advantages = rollout_data.cost_advantages
-                if self.normalize_advantage and len(cost_advantages) > 1:
-                    cost_advGantages = (cost_advantages - cost_advantages.mean()) / (cost_advantages.std() + 1e-8)
+                if self.normalize_cost_advantage and len(cost_advantages) > 1:
+                    cost_advantages = (cost_advantages - cost_advantages.mean()) / (cost_advantages.std() + 1e-8)
 
                 assert len(self.ep_info_buffer) > 0
 
@@ -427,14 +491,11 @@ class SPMAALM(CostDecisionAwareOnPolicyAlgorithm):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
 
-    def dual_update(self):
-        assert len(self.ep_info_buffer) > 0
-        Jc = safe_mean([ep_info["c"] for ep_info in self.ep_info_buffer])
-
-        # print(f"{Jc=} Lag before update: {self.lagrange.lagrangian_multiplier.item()}")
+    def dual_update(self, Jc):
         self.lagrange.update_lagrange_alm(Jc, self.tau)
-        # print(f"Lag after update: {self.lagrange.lagrangian_multiplier.item()}")
+        self.tau *= self.beta
         self.logger.record("train/lagrange_multiplier", self.lagrange.lagrangian_multiplier.item())
+        self.logger.record("train/alm_penalty", self.tau)
 
     def learn(
         self: SelfSPMAALM,
@@ -468,29 +529,24 @@ class SPMAALM(CostDecisionAwareOnPolicyAlgorithm):
                     self.rollout_buffer,
                     n_rollout_steps=self.n_steps,
                 )
-                if not continue_training:
-                    break
 
                 iteration += 1
                 self._update_current_progress_remaining(self.num_timesteps, total_timesteps)
 
-                if k == num_inner_updates - 1 and iteration > num_inner_updates:
-                    self.dual_update()
+                # update dual variable with J^{\pi_{t+1}} which corresponds to the 
+                if k == 0 and iteration >= num_inner_updates:
+                    print(f'doing a dual update at: {self.num_timesteps}')
+                    Jc_rollout = safe_mean([ep_info["c"] for ep_info in callback.rollout_info_buffer])
+                    self.dual_update(Jc_rollout)
 
-                # print(f"training at steps: {self.num_timesteps}")
                 self.train()
-
-                # reset buffers
-                self.ep_info_buffer = deque(maxlen=self._stats_window_size)
-                self.ep_success_buffer = deque(maxlen=self._stats_window_size)
+                self.evaluate()
+                self.dump_logs(iteration)
 
             if not continue_training:
                 break
 
-            if log_interval is not None and iteration % log_interval == 0:
-                assert self.ep_info_buffer is not None
-                self.dump_logs(iteration)
-
         callback.on_training_end()
 
         return self
+
