@@ -367,7 +367,7 @@ class PPO_ATARI_CONFIG:
     n_steps: int = 128
     n_epochs: int = 4
     batch_size: int = 256
-    n_timesteps: int = 3_000_000
+    n_timesteps: int = 5_000_000
     learning_rate: float = 2.5e-4  #  linear schedule
     clip_range: float = 0.1  # linear schedule
     vf_coef: float = 0.5
@@ -498,10 +498,10 @@ if __name__ == "__main__":
 
     parser.add_argument("--env_id", type=str, default="ALE/Pong-v5")
     parser.add_argument("--seed", type=int)
-    parser.add_argument("--slurm_id", type=int)
+    parser.add_argument("--slurm_task_id", type=int)
     args = parser.parse_args()
 
-    exp_log_dir = f"./runs/{args.exp_name}/task_id_{args.slurm_id}"
+    exp_log_dir = f"./runs/{args.exp_name}/task_id_{args.slurm_task_id}"
     Path.mkdir(Path(exp_log_dir), exist_ok=True, parents=True)
 
-    train(exp_log_dir, args.env_id, args.seed, args.use_objects, args.use_wandb, args.exp_name, args.slurm_id)
+    train(exp_log_dir, args.env_id, args.seed, args.use_objects, args.use_wandb, args.exp_name, args.slurm_task_id)
