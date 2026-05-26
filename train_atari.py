@@ -501,7 +501,7 @@ if __name__ == "__main__":
     parser.add_argument("--slurm_task_id", type=int)
     args = parser.parse_args()
 
-    exp_log_dir = f"./runs/{args.exp_name}/task_id_{args.slurm_id}"
+    exp_log_dir = f"./runs/{args.exp_name}/task_id_{args.slurm_task_id}"
     Path.mkdir(Path(exp_log_dir), exist_ok=True, parents=True)
 
     train(exp_log_dir, args.env_id, args.seed, args.use_objects, args.use_wandb, args.exp_name, args.slurm_task_id)
