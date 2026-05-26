@@ -107,4 +107,5 @@ dependencies = [
     "pandas",
     "matplotlib",
     "ruff>=0.15.14",
+    "ocatari>=2.2.1",
 ]
