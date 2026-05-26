@@ -17,7 +17,7 @@ from ocatari.ram.pong import Player
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.atari_wrappers import AtariWrapper
-from stable_baselines3.common.callbacks import BaseCallback, CallbackList, EventCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback, EventCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.vec_env import VecFrameStack, VecTransposeImage
@@ -367,7 +367,7 @@ class PPO_ATARI_CONFIG:
     n_steps: int = 128
     n_epochs: int = 4
     batch_size: int = 256
-    n_timesteps: int = 5_000_000
+    n_timesteps: int = 10_000_000
     learning_rate: float = 2.5e-4  #  linear schedule
     clip_range: float = 0.1  # linear schedule
     vf_coef: float = 0.5
@@ -472,9 +472,13 @@ def train(exp_log_dir, env_id, seed, use_objects, use_wandb, exp_name, slurm_id)
         dump_log=True
     )
 
-    callback = CallbackList([standard_eval_callback, tertiary_eval_callback])
+    checkpoint_callback = CheckpointCallback(
+        save_freq=max(2_000_000 // cfg.n_envs, 1),
+        log_path=f"{exp_log_dir}/models/",
+    )
+
+    callback = CallbackList([checkpoint_callback, standard_eval_callback, tertiary_eval_callback])
     model.learn(total_timesteps=cfg.n_timesteps, callback=callback)
-    # save final policy
     model.save(f"{exp_log_dir}/final_model")
 
 
@@ -484,8 +488,7 @@ if __name__ == "__main__":
         """Convert string to boolean"""
         if isinstance(v, bool):
             return v
-        if v.lower() in ("yes", "true", "t", "y", "1"):
-            return True
+        if v.lower() in ("yes", "true", "t", "y", "1"): return True
         elif v.lower() in ("no", "false", "f", "n", "0"):
             return False
         else:
