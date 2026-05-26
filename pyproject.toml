@@ -108,4 +108,5 @@ dependencies = [
     "matplotlib",
     "ruff>=0.15.14",
     "ocatari>=2.2.1",
+    "wandb>=0.27.0",
 ]

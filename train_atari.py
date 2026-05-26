@@ -1,23 +1,12 @@
+import wandb
 import argparse
-from dataclasses import dataclass
-from pathlib import Path
-
-import ale_py
-import gymnasium as gym
-
-from stable_baselines3 import PPO
-from stable_baselines3.common.atari_wrappers import AtariWrapper
-from stable_baselines3.common.callbacks import CallbackList, EventCallback, BaseCallback
-from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.logger import configure
-from stable_baselines3.common.vec_env import VecFrameStack, VecTransposeImage
-
-gym.register_envs(ale_py)  # unnecessary but helpful for IDEs
-
 import os
 import warnings
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import ale_py
 import gymnasium as gym
 import numpy as np
 from ocatari.ram.extract_ram_info import (
@@ -25,6 +14,13 @@ from ocatari.ram.extract_ram_info import (
     init_objects,
 )
 from ocatari.ram.pong import Player
+
+from stable_baselines3 import PPO
+from stable_baselines3.common.atari_wrappers import AtariWrapper
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList, EventCallback
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.logger import configure
+from stable_baselines3.common.vec_env import VecFrameStack, VecTransposeImage
 
 try:
     from tqdm import TqdmExperimentalWarning
@@ -44,6 +40,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, sync_envs_norm
 if TYPE_CHECKING:
     pass
 
+gym.register_envs(ale_py)  # unnecessary but helpful for IDEs
 
 class EvalCallback(EventCallback):
     """
@@ -87,6 +84,7 @@ class EvalCallback(EventCallback):
         verbose: int = 1,
         warn: bool = True,
         reward_type: str = "score",
+        dump_log: bool = False
     ):
         super().__init__(callback_after_eval, verbose=verbose)
 
@@ -121,6 +119,7 @@ class EvalCallback(EventCallback):
         self.evaluations_successes: list[list[bool]] = []
 
         self.reward_type = reward_type
+        self.dump_log = dump_log
 
     def _init_callback(self) -> None:
         # Does not work in some corner cases, where the wrapper is not the same
@@ -222,7 +221,8 @@ class EvalCallback(EventCallback):
 
             # Dump log so the evaluation results are printed with the correct timestep
             self.logger.record("time/total_timesteps", self.num_timesteps, exclude="tensorboard")
-            self.logger.dump(self.num_timesteps)
+            if self.dump_log:
+                self.logger.dump(self.num_timesteps)
 
             if mean_reward > self.best_mean_reward:
                 if self.verbose >= 1:
@@ -367,7 +367,7 @@ class PPO_ATARI_CONFIG:
     n_steps: int = 128
     n_epochs: int = 4
     batch_size: int = 256
-    n_timesteps: int = 2_000_000
+    n_timesteps: int = 3_000_000
     learning_rate: float = 2.5e-4  #  linear schedule
     clip_range: float = 0.1  # linear schedule
     vf_coef: float = 0.5
@@ -410,7 +410,18 @@ def linear_schedule(initial_value: float):
     return func
 
 
-def train(exp_log_dir, env_id, seed, use_objects, use_wandb):
+def train(exp_log_dir, env_id, seed, use_objects, use_wandb, exp_name, slurm_id):
+    if use_wandb:
+        config = {}
+        config["algo"] = 'PPO'
+        config["seed"] = seed
+        config["env_id"] = env_id
+        wandb.init(
+            project='RLwPrefAtari',
+            name=f"{exp_name}_{slurm_id}",
+            config=config,
+            sync_tensorboard=True,
+        )
 
     cfg = PPO_ATARI_CONFIG(env_id=env_id, seed=seed)
     logger = configure(exp_log_dir, ["stdout", "csv", "tensorboard"])
@@ -431,10 +442,12 @@ def train(exp_log_dir, env_id, seed, use_objects, use_wandb):
         seed=cfg.seed,
         verbose=1,
         device="auto",
+        tensorboard_log=exp_log_dir
     )
     model.set_logger(logger)
 
-    # TODO: change logging to be in its own sep
+    # ORDER IS REALLY IMPORANT
+    # WE ONLY DUMP THE LOGS AFTER THE LAST EVALCALLBACK IS CALLED
     standard_eval_callback = EvalCallback(
         standard_atari_eval_env,
         n_eval_episodes=5,
@@ -444,6 +457,7 @@ def train(exp_log_dir, env_id, seed, use_objects, use_wandb):
         render=False,
         verbose=1,
         reward_type="score",
+        dump_log=False
     )
 
     tertiary_eval_callback = EvalCallback(
@@ -455,17 +469,8 @@ def train(exp_log_dir, env_id, seed, use_objects, use_wandb):
         render=False,
         verbose=1,
         reward_type="object",
+        dump_log=True
     )
-
-    # eval_callback = EvalCallback(
-    #     eval_env,
-    #     n_eval_episodes=5,
-    #     log_path=exp_log_dir,
-    #     eval_freq=max(cfg.eval_freq // cfg.n_envs, 1),
-    #     deterministic=True,
-    #     render=False,
-    #     verbose=1,
-    # )
 
     callback = CallbackList([standard_eval_callback, tertiary_eval_callback])
     model.learn(total_timesteps=cfg.n_timesteps, callback=callback)
@@ -499,4 +504,4 @@ if __name__ == "__main__":
     exp_log_dir = f"./runs/{args.exp_name}/task_id_{args.slurm_id}"
     Path.mkdir(Path(exp_log_dir), exist_ok=True, parents=True)
 
-    train(exp_log_dir, args.env_id, args.seed, args.use_objects, args.use_wandb)
+    train(exp_log_dir, args.env_id, args.seed, args.use_objects, args.use_wandb, args.exp_name, args.slurm_id)
