@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH -J Atari
 #SBATCH --time=0-06:00
-#SBATCH --mem=2G
-#SBATCH --cpus-per-task=1
+#SBATCH --mem=4G
+#SBATCH --cpus-per-task=4
 #SBATCH --array=0-4%5
-#SBATCH --gpus=a100_1g.1gb:1
+#SBATCH --gpus=a100_1g.5gb:1
 #SBATCH --output=cc/%x_%a.out
 
 module restore sb3
