@@ -473,8 +473,8 @@ def train(exp_log_dir, env_id, seed, use_objects, use_wandb, exp_name, slurm_id)
     )
 
     checkpoint_callback = CheckpointCallback(
-        save_freq=max(2_000_000 // cfg.n_envs, 1),
-        log_path=f"{exp_log_dir}/models/",
+        save_freq=max(1_000_000 // cfg.n_envs, 1),
+        save_path=f"{exp_log_dir}/models/",
     )
 
     callback = CallbackList([checkpoint_callback, standard_eval_callback, tertiary_eval_callback])
