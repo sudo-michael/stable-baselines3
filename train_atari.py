@@ -1,4 +1,3 @@
-import wandb
 import argparse
 import os
 import warnings
@@ -15,6 +14,7 @@ from ocatari.ram.extract_ram_info import (
 )
 from ocatari.ram.pong import Player
 
+import wandb
 from stable_baselines3 import PPO
 from stable_baselines3.common.atari_wrappers import AtariWrapper
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback, EventCallback
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     pass
 
 gym.register_envs(ale_py)  # unnecessary but helpful for IDEs
+
 
 class EvalCallback(EventCallback):
     """
@@ -84,7 +85,7 @@ class EvalCallback(EventCallback):
         verbose: int = 1,
         warn: bool = True,
         reward_type: str = "score",
-        dump_log: bool = False
+        dump_log: bool = False,
     ):
         super().__init__(callback_after_eval, verbose=verbose)
 
@@ -367,7 +368,7 @@ class PPO_ATARI_CONFIG:
     n_steps: int = 128
     n_epochs: int = 4
     batch_size: int = 256
-    n_timesteps: int = 10_000_000
+    n_timesteps: int = 5_000_000
     learning_rate: float = 2.5e-4  #  linear schedule
     clip_range: float = 0.1  # linear schedule
     vf_coef: float = 0.5
@@ -375,7 +376,7 @@ class PPO_ATARI_CONFIG:
     eval_freq: int = 25_000
 
 
-def make_atari_env(env_id, n_envs, n_stack, seed, use_objects):
+def make_atari_env(env_id, n_envs, n_stack, seed, use_objects, pong_boundary_y):
     # Since ALE-py v0.11, a number of registered Atari environments were removed including the `NoFrameskip` varients.
     # To recreate it, we require the following parameters.
     env_kwargs = {"obs_type": "rgb", "frameskip": 1, "repeat_action_probability": 0.0, "full_action_space": False}
@@ -384,7 +385,7 @@ def make_atari_env(env_id, n_envs, n_stack, seed, use_objects):
         env = gym.make(env_id, **env_kwargs)
         if use_objects:
             env = ObjectInfoWrapper(env, hud=True)
-            env = PongTertiaryRewardWrapper(env, boundary_y=60)
+            env = PongTertiaryRewardWrapper(env, boundary_y=pong_boundary_y)
         return env
 
     env = make_vec_env(dummy, n_envs=n_envs, seed=seed, wrapper_class=AtariWrapper)
@@ -410,24 +411,29 @@ def linear_schedule(initial_value: float):
     return func
 
 
-def train(exp_log_dir, env_id, seed, use_objects, use_wandb, exp_name, slurm_id):
+def train(exp_log_dir, env_id, seed, use_objects, use_wandb, exp_name, slurm_id, pong_boundary_y):
     if use_wandb:
         config = {}
-        config["algo"] = 'PPO'
+        config["algo"] = "PPO"
         config["seed"] = seed
         config["env_id"] = env_id
         wandb.init(
-            project='RLwPrefAtari',
+            project="RLwPrefAtari",
             name=f"{exp_name}_{slurm_id}",
             config=config,
             sync_tensorboard=True,
         )
 
     cfg = PPO_ATARI_CONFIG(env_id=env_id, seed=seed)
+    print(cfg)
     logger = configure(exp_log_dir, ["stdout", "csv", "tensorboard"])
-    env = make_atari_env(env_id, cfg.n_envs, cfg.frame_stack, seed, use_objects)
-    standard_atari_eval_env = make_atari_env(env_id, 1, cfg.frame_stack, seed + 10_067, use_objects=False)
-    tertiary_atari_eval_env = make_atari_env(env_id, 1, cfg.frame_stack, seed + 10_067, use_objects=True)
+    env = make_atari_env(env_id, cfg.n_envs, cfg.frame_stack, seed, use_objects, pong_boundary_y=pong_boundary_y)
+    standard_atari_eval_env = make_atari_env(
+        env_id, 1, cfg.frame_stack, seed + 10_067, use_objects=False, pong_boundary_y=pong_boundary_y
+    )
+    tertiary_atari_eval_env = make_atari_env(
+        env_id, 1, cfg.frame_stack, seed + 10_067, use_objects=True, pong_boundary_y=pong_boundary_y
+    )
 
     model = PPO(
         policy=cfg.policy,
@@ -441,8 +447,8 @@ def train(exp_log_dir, env_id, seed, use_objects, use_wandb, exp_name, slurm_id)
         vf_coef=cfg.vf_coef,
         seed=cfg.seed,
         verbose=1,
-        device="auto",
-        tensorboard_log=exp_log_dir
+        device="cpu",
+        tensorboard_log=exp_log_dir,
     )
     model.set_logger(logger)
 
@@ -457,7 +463,7 @@ def train(exp_log_dir, env_id, seed, use_objects, use_wandb, exp_name, slurm_id)
         render=False,
         verbose=1,
         reward_type="score",
-        dump_log=False
+        dump_log=False,
     )
 
     tertiary_eval_callback = EvalCallback(
@@ -469,11 +475,11 @@ def train(exp_log_dir, env_id, seed, use_objects, use_wandb, exp_name, slurm_id)
         render=False,
         verbose=1,
         reward_type="object",
-        dump_log=True
+        dump_log=True,
     )
 
     checkpoint_callback = CheckpointCallback(
-        save_freq=max(1_000_000 // cfg.n_envs, 1),
+        save_freq=max(2_000_000 // cfg.n_envs, 1),
         save_path=f"{exp_log_dir}/models/",
     )
 
@@ -488,7 +494,8 @@ if __name__ == "__main__":
         """Convert string to boolean"""
         if isinstance(v, bool):
             return v
-        if v.lower() in ("yes", "true", "t", "y", "1"): return True
+        if v.lower() in ("yes", "true", "t", "y", "1"):
+            return True
         elif v.lower() in ("no", "false", "f", "n", "0"):
             return False
         else:
@@ -502,9 +509,19 @@ if __name__ == "__main__":
     parser.add_argument("--env_id", type=str, default="ALE/Pong-v5")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--slurm_task_id", type=int)
+    parser.add_argument("--pong_boundary_y", type=int, default=60)
     args = parser.parse_args()
 
     exp_log_dir = f"./runs/{args.exp_name}/task_id_{args.slurm_task_id}"
     Path.mkdir(Path(exp_log_dir), exist_ok=True, parents=True)
 
-    train(exp_log_dir, args.env_id, args.seed, args.use_objects, args.use_wandb, args.exp_name, args.slurm_task_id)
+    train(
+        exp_log_dir,
+        args.env_id,
+        args.seed,
+        args.use_objects,
+        args.use_wandb,
+        args.exp_name,
+        args.slurm_task_id,
+        args.pong_boundary_y,
+    )
