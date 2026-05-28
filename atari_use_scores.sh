@@ -4,6 +4,7 @@
 #SBATCH --mem=4G
 #SBATCH --cpus-per-task=4
 #SBATCH --array=0-14%15
+#SBATCH --gpus=a100_1g.5gb:1
 #SBATCH --output=cc/%x_%a.out
 
 module restore sb3
@@ -23,7 +24,7 @@ read boundary_y seed <<< "$PARAM"
 # ---------------------
 python train_atari.py \
     --use_wandb False \
-    --exp_name atari_scores_changing_y_boundary \
+    --exp_name atari_scores_changing_y_boundary_gpu \
     --slurm_task_id $TASK_ID \
     --seed $seed \
     --use_objects False \

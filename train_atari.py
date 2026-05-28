@@ -447,7 +447,7 @@ def train(exp_log_dir, env_id, seed, use_objects, use_wandb, exp_name, slurm_id,
         vf_coef=cfg.vf_coef,
         seed=cfg.seed,
         verbose=1,
-        device="cpu",
+        device="auto",
         tensorboard_log=exp_log_dir,
     )
     model.set_logger(logger)
